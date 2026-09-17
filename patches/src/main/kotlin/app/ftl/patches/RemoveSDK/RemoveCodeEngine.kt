@@ -1,4 +1,4 @@
-package app.patches.removecode
+package app.ftl.patches.removesdk
 
 import app.morphe.patcher.dex.BytecodeMode
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
