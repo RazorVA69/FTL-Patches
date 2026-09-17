@@ -12,8 +12,8 @@ import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.instruction.RegisterAInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
@@ -143,7 +143,14 @@ private fun cleanMethodSurgically(
             }
 
             ref is FieldReference && isFieldGet(insn.opcode) -> {
-                val registerA = (insn as? RegisterAInstruction)?.registerA ?: return false
+                // sget has one register (the destination); iget has two registers
+                // (destination A and object B). Both expose the destination as registerA,
+                // but dexlib2 models them with different interfaces.
+                val registerA = when (insn) {
+                    is OneRegisterInstruction -> insn.registerA
+                    is TwoRegisterInstruction -> insn.registerA
+                    else -> return false
+                }
                 edits += Edit(index, zeroLoadFor(registerA, ref.type))
                 changed = true
             }
