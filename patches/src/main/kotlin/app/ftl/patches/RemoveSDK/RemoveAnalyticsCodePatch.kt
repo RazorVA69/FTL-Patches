@@ -6,8 +6,10 @@ import app.ftl.patches.RemoveSDK.targets.ANALYTICS_TARGETS
 @Suppress("unused")
 val removeAnalyticsCodePatch = bytecodePatch(
     name = "Remove analytics code",
-    description = "Deletes bundled analytics/tracking SDK classes and scrubs every remaining reference to them.",
-    default = true,
+    description = "Deletes bundled analytics/tracking SDK classes and scrubs every remaining reference to them. " +
+        "Expert: do not combine with Remove Ads / Remove Analytics or per-app patches; " +
+        "apps that inflate tracking views from XML or Class.forName() the SDK will crash.",
+    default = false,
 ) {
     execute {
         removeCodeByPrefix("analytics", ANALYTICS_TARGETS)
