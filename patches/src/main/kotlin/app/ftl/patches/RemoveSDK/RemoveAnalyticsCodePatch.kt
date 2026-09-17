@@ -1,7 +1,7 @@
-package app.ftl.patches.removesdk
+package app.ftl.patches.RemoveSDK
 
 import app.morphe.patcher.patch.bytecodePatch
-import app.patches.removecode.targets.ANALYTICS_TARGETS
+import app.ftl.patches.RemoveSDK.targets.ANALYTICS_TARGETS
 
 @Suppress("unused")
 val removeAnalyticsCodePatch = bytecodePatch(

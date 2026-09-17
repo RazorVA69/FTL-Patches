@@ -1,7 +1,7 @@
-package app.ftl.patches.removesdk
+package app.ftl.patches.RemoveSDK
 
 import app.morphe.patcher.patch.bytecodePatch
-import app.patches.removecode.targets.ADS_TARGETS
+import app.ftl.patches.RemoveSDK.targets.ADS_TARGETS
 
 @Suppress("unused")
 val removeAdsCodePatch = bytecodePatch(

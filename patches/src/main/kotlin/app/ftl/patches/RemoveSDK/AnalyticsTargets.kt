@@ -1,4 +1,4 @@
-package app.ftl.patches.removesdk.targets
+package app.ftl.patches.RemoveSDK.targets
 
 val ANALYTICS_TARGETS: List<String> = listOf(
     "LS4MAnalytic/",

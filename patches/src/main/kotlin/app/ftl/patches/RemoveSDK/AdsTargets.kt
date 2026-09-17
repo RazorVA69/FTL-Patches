@@ -1,4 +1,4 @@
-package app.patches.removecode.targets
+package app.ftl.patches.RemoveSDK.targets
 
 val ADS_TARGETS: List<String> = listOf(
     "Ladmost/adserver/",
