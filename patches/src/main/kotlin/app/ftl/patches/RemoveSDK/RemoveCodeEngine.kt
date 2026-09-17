@@ -8,6 +8,7 @@ import app.morphe.patcher.extensions.InstructionExtensions.removeInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.patch.BytecodePatchContext
 import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
@@ -34,8 +35,10 @@ import java.util.logging.Logger
  *          the destination register may still be read later); field writes and void
  *          calls are removed outright (nothing downstream depends on them).
  *        - otherwise (non-void invoke, <init> invoke, new-instance/check-cast/
- *          instance-of/new-array/filled-new-array/const-class of a target, or a catch
- *          block on a target exception type) -> whole-method stub. Constructors keep a
+ *          instance-of/new-array/filled-new-array/const-class of a target, a catch
+ *          block on a target exception type, or the method having ANY pre-existing
+ *          try/catch block at all, target-related or not) -> whole-method stub, with
+ *          the method's try blocks explicitly cleared first. Constructors keep a
  *          minimal super-call so the class stays verifiable.
  *   3. Drop declared fields whose type is a target - safe once every class has passed
  *      through step 2, since every read/write of such a field was already neutralized
@@ -56,6 +59,15 @@ import java.util.logging.Logger
  * logic too when stubbed. Matching, unlike SmaliScissors' raw substring search over smali
  * text, is reference-type-exact, so a string literal that happens to contain a target
  * package name is never a false match.
+ *
+ * Any method with a pre-existing try/catch block (regardless of whether it references a
+ * target) is also routed to the whole-method stub rather than the surgical path, and that
+ * path clears the method's try blocks before wiping its instructions. Shrinking a try
+ * range around one removed/replaced instruction relies on dexlib2's label tracking, and
+ * wiping a method's entire body is exactly the case that tracking does not recover from
+ * cleanly - it can leave a stale try_item with a collapsed startAddr=0/endAddr=0 range
+ * instead of dropping it, which is a hard VerifyError ("bad exception entry") at
+ * class-load time. A stubbed body has nothing left to catch anyway.
  */
 
 private fun String.isTarget(prefixes: List<String>) = prefixes.any { startsWith(it) }
@@ -82,6 +94,14 @@ private fun minimalReturnFor(returnType: String): String = when (returnType) {
 private fun zeroLoadFor(reg: Int, type: String): String = when (type) {
     "J", "D" -> "const-wide/16 v$reg, 0x0"
     else -> "const/4 v$reg, 0x0"
+}
+
+/** getTryBlocks() is declared List<out TryBlock<...>> on the MethodImplementation
+ *  interface, but MutableMethodImplementation's own backing list is mutable at runtime -
+ *  this just recovers that. */
+@Suppress("UNCHECKED_CAST")
+private fun clearTryBlocks(implementation: MutableMethodImplementation) {
+    (implementation.tryBlocks as MutableList<Any?>).clear()
 }
 
 /** Reflection: private classMap inside BytecodePatchContext.patchClasses. No public API for it. */
@@ -164,11 +184,10 @@ fun BytecodePatchContext.removeCodeByPrefix(tag: String, prefixes: List<String>)
 
             val impl = mutableMethod.implementation ?: continue
             val insns = impl.instructions.toList()
-            val hasCatchTarget = impl.tryBlocks.any { tb ->
-                tb.exceptionHandlers.any { it.exceptionType?.isTarget(prefixes) == true }
-            }
 
-            var allSurgical = !hasCatchTarget
+            // ANY pre-existing try/catch - target-related or not - disqualifies the
+            // surgical path entirely; see the file header for why.
+            var allSurgical = impl.tryBlocks.isEmpty()
             val surgicalEdits = ArrayList<Pair<Int, String?>>()   // index -> replacement smali, null = remove
             if (allSurgical) {
                 for ((index, insn) in insns.withIndex()) {
@@ -206,6 +225,7 @@ fun BytecodePatchContext.removeCodeByPrefix(tag: String, prefixes: List<String>)
                     else mutableMethod.replaceInstruction(index, smali)
                 }
             } else {
+                clearTryBlocks(impl)
                 val count = mutableMethod.instructions.size
                 mutableMethod.removeInstructions(0, count)
                 when (mutableMethod.name) {
