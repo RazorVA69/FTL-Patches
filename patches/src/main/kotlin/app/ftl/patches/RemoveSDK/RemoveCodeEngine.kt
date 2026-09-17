@@ -96,12 +96,16 @@ private fun zeroLoadFor(reg: Int, type: String): String = when (type) {
     else -> "const/4 v$reg, 0x0"
 }
 
-/** getTryBlocks() is declared List<out TryBlock<...>> on the MethodImplementation
- *  interface, but MutableMethodImplementation's own backing list is mutable at runtime -
- *  this just recovers that. */
+/** getTryBlocks() wraps the backing list in Collections.unmodifiableList (verified against
+ *  dexlib2 source - there is no public removal API, addCatch() is the only mutator and it's
+ *  purely additive) - so .clear() on the getter's return value throws UnsupportedOperationException.
+ *  Reflect on the private backing field directly instead; that ArrayList itself is genuinely
+ *  mutable, only the accessor hides it. */
 @Suppress("UNCHECKED_CAST")
 private fun clearTryBlocks(implementation: MutableMethodImplementation) {
-    (implementation.tryBlocks as MutableList<Any?>).clear()
+    val field = MutableMethodImplementation::class.java.getDeclaredField("tryBlocks")
+        .apply { isAccessible = true }
+    (field.get(implementation) as MutableList<*>).clear()
 }
 
 /** Reflection: private classMap inside BytecodePatchContext.patchClasses. No public API for it. */
