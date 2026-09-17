@@ -20,7 +20,7 @@ import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import java.util.logging.Logger
 
 /*
- * Morphe implementation of the useful part of SmaliScissors REMOVE_CODE.
+ * Morph implementation of the useful part of SmaliScissors REMOVE_CODE.
  *
  * The engine intentionally works on typed dexlib2 references instead of smali text. It
  * removes targeted classes, cleans safe target calls and fields, propagates non-void call
