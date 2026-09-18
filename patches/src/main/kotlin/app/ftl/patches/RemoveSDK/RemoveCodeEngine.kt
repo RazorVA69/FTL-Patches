@@ -86,9 +86,13 @@ private fun minimalReturnFor(returnType: String): List<String> = when (returnTyp
     else -> listOf("const/4 v0, 0x0", "return-object v0")
 }
 
+/** const/16, not const/4: SGET/IGET's own register field is 8-bit (v0-255), but const/4's
+ *  is 4-bit (v0-15) - replacing a high-numbered destination with const/4 would hit the same
+ *  register-range failure as the invoke-direct/p0 case above. const/16 covers the same
+ *  range SGET/IGET can ever actually produce. */
 private fun zeroLoadFor(reg: Int, type: String): String = when (type) {
     "J", "D" -> "const-wide/16 v$reg, 0x0"
-    else -> "const/4 v$reg, 0x0"
+    else -> "const/16 v$reg, 0x0"
 }
 
 /** getTryBlocks() wraps the backing list in Collections.unmodifiableList (verified against
@@ -235,7 +239,26 @@ private fun BytecodePatchContext.runRound(
                 clearTryBlocks(impl)
                 val originalCount = mutableMethod.instructions.size
                 val stubBody = when (mutableMethod.name) {
-                    "<init>" -> listOf("invoke-direct {p0}, $effectiveSuper-><init>()V", "return-void")
+                    "<init>" -> {
+                        // "p0" in the regular invoke-direct format resolves to an absolute
+                        // register number - registerCount minus this-and-param width - which
+                        // for a method with many locals (large registerCount) lands well
+                        // above v15, the ceiling the 4-bit register-argument format allows.
+                        // registerCount is fixed (dexlib2 MutableMethodImplementation has no
+                        // setter for it), so compute the real number ourselves and fall back
+                        // to invoke-direct/range - which addresses any register - once it's
+                        // out of range instead of relying on "p0" to resolve safely.
+                        val paramWidth = mutableMethod.parameterTypes.sumOf {
+                            if (it.toString() == "J" || it.toString() == "D") 2 else 1
+                        }
+                        val thisReg = impl.registerCount - paramWidth - 1
+                        val superCall = if (thisReg <= 15) {
+                            "invoke-direct {v$thisReg}, $effectiveSuper-><init>()V"
+                        } else {
+                            "invoke-direct/range {v$thisReg .. v$thisReg}, $effectiveSuper-><init>()V"
+                        }
+                        listOf(superCall, "return-void")
+                    }
                     "<clinit>" -> listOf("return-void")
                     else -> minimalReturnFor(mutableMethod.returnType)
                 }
@@ -274,7 +297,19 @@ private fun BytecodePatchContext.runRound(
                     ref?.name == "<init>" && ref.definingClass == classDef.superclass
                 }
                 if (superCallIdx != -1) {
-                    ctor.replaceInstruction(superCallIdx, "invoke-direct {p0}, Ljava/lang/Object;-><init>()V")
+                    // Same v15 register-argument ceiling as the whole-method stub's
+                    // super-call above - "p0" resolves to registerCount - paramWidth, which
+                    // is only ever addressable as a plain "vN" once it's within v0-v15.
+                    val paramWidth = ctor.parameterTypes.sumOf {
+                        if (it.toString() == "J" || it.toString() == "D") 2 else 1
+                    }
+                    val thisReg = body.registerCount - paramWidth - 1
+                    val superCall = if (thisReg <= 15) {
+                        "invoke-direct {v$thisReg}, Ljava/lang/Object;-><init>()V"
+                    } else {
+                        "invoke-direct/range {v$thisReg .. v$thisReg}, Ljava/lang/Object;-><init>()V"
+                    }
+                    ctor.replaceInstruction(superCallIdx, superCall)
                 }
             }
         }
