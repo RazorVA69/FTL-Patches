@@ -61,11 +61,7 @@ val ADS_TARGETS: List<String> = listOf(
     "Lcom/google/ads/",
     "Lcom/google/android/ads/",
     "Lcom/google/android/gms/admob/",
-    "Lcom/google/android/gms/ads/AdActivity/",
-    "Lcom/google/android/gms/ads/AdRequest/",
-    "Lcom/google/android/gms/ads/AdView/",
-    "Lcom/google/android/gms/ads/doubleclick/",
-    "Lcom/google/android/gms/ads/mediation/",
+    "Lcom/google/android/gms/ads/",
     "Lcom/google/firebase/firebase_ads/",
     "Lcom/google/unity/ads/",
     "Lcom/huawei/agconnect/",
@@ -184,4 +180,15 @@ val ADS_TARGETS: List<String> = listOf(
     "Ltv/superawesome/lib/",
     "Ltv/superawesome/sdk/",
     "Ltv/teads/",
+)
+
+/**
+ * SDK-internal implementation packages: never called by app code or declared in a
+ * manifest, only ever called BY the ADS_TARGETS classes above. Deleted only once the
+ * reachability sweep confirms nothing outside the deleted set still references them -
+ * never blanket-deleted, since a shared internal helper still in use elsewhere would
+ * otherwise survive the check and correctly stay put.
+ */
+val ADS_SWEEP_ROOTS: List<String> = listOf(
+    "Lcom/google/android/gms/internal/ads/",
 )

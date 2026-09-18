@@ -9,83 +9,61 @@ import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.patch.BytecodePatchContext
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
-import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
-import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
-import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
-import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import java.util.logging.Logger
 
 /*
- * Port of SmaliScissors' [REMOVE_CODE] engine onto dexlib2/Morphe. Given a list of type
- * folder prefixes (e.g. "Lcom/google/android/gms/ads/"):
+ * Port of SmaliScissors' [REMOVE_CODE] engine onto dexlib2/Morphe.
  *
- *   1. Mark every class under those prefixes for deletion.
- *   2. For every surviving class, scan every method for a reference to a target type
- *      (invoke definingClass/params/return, field definingClass/type, new-instance,
- *      check-cast, instance-of, new-array, filled-new-array, const-class, catch types):
- *        - method's OWN return/parameter type is a target -> delete the method outright.
- *          Any caller shares that exact signature in its invoke reference, so it gets
- *          caught and cleaned by this same pass - never left as a dangling call.
- *        - otherwise, any method with a pre-existing try/catch block (target-related or
- *          not) -> whole-method stub, try blocks cleared first (see below for why).
- *        - otherwise, every target-touching instruction is tentatively marked removable,
- *          plus the move-result immediately following an invoke that's marked removable.
- *          A register-escape check then asks, for every register a removable instruction
- *          writes: is that register read by anything NOT in the removable set? If every
- *          write stays fully contained inside the removable set, the whole block is
- *          excised and the rest of the method is untouched - this is what reproduces
- *          SmaliScissors' actual behaviour (e.g. a `new AdRequest.Builder().build()` then
- *          `.loadAd(...)` chain disappears as a unit, an unrelated caller of the same
- *          method keeps working). If any write escapes, or a target-typed constructor
- *          call's own new-instance isn't itself removable, the method falls back to a
- *          whole-method stub instead - a method mixing an SDK call with real app logic
- *          loses that unrelated logic when this fallback triggers, which is the one
- *          remaining gap versus a full dataflow port.
- *   3. Drop declared fields whose type is a target - safe once every class has passed
- *      through step 2, since every read/write of such a field was already neutralized
- *      regardless of which class declared it.
- *   4. Rewrite extends/implements for classes whose superclass/interface is a target,
- *      fixing the affected <init> super-call to Ljava/lang/Object;-><init>()V.
- *   5. Remove now-empty <clinit> bodies.
- *   6. Delete every class marked in step 1 directly from the dex (classMap reflection,
- *      forcing BytecodeMode.FULL so STRIP modes can't silently keep it) - actually gone,
- *      not just gutted.
+ * SmaliRemoveJob is not a single pass: it removes seed targets, cleans every remaining
+ * reference to them, and if a method or class can't be cleaned without breaking, THAT
+ * becomes a new target for the next round - a worklist run to a fixed point. This file
+ * replicates that as a round loop: each round does exactly what the original single-pass
+ * engine did, and a class that ends up with no meaningful body left because its
+ * superclass/interface was a target is folded into the target set for the next round,
+ * so classes that exist purely as SDK wrappers/listeners get removed too, and whatever
+ * held a reference to THEM gets cleaned in turn.
  *
- * Matching: a folder-style prefix like "Lcom/google/android/gms/ads/AdView/" also matches
- * the bare leaf class itself (Lcom/google/android/gms/ads/AdView;) and its inner/synthetic
- * classes (Lcom/google/android/gms/ads/AdView$1;) - dex uses "$" for nesting, not "/", so a
- * literal-prefix-with-trailing-slash match alone silently misses both. This was verified
- * against a real APK: it's the reason AdView/AdRequest/AdRequest$Builder references were
- * being left completely untouched even though those exact folders are in the target lists.
+ * Separately, SmaliScissors' output includes classes that were never in any target list
+ * at all - e.g. com.google.android.gms.internal.ads - because nothing outside the SDK's
+ * own top-level classes ever calls into them; once the top-level layer is gone, they're
+ * simply unreferenced. That is reference counting, not cascade (cascade cleans callers of
+ * a deleted class; this removes callees of a deleted class that nothing else still needs),
+ * and it is handled as a distinct sweep phase over an explicit SWEEP_ROOTS list, run only
+ * after every round above has converged. Sweep roots must never be able to overlap with
+ * TARGETS entries that the app itself calls directly (e.g. the public
+ * com/google/android/gms/ads/ API surface) - those have to stay hard targets, cleaned via
+ * the cascade above, precisely because the app DOES hold live references to them and a
+ * reference-count sweep would just find those references and keep them.
+ *
+ * Deliberate simplification vs. SmaliScissors: it tracks per-opcode register dataflow to
+ * surgically excise a target reference from a method that also does unrelated work,
+ * keeping the rest of that method intact. That is not replicated here - any instruction
+ * outside the two provably-safe shapes below stubs the WHOLE containing method instead.
+ * In practice this is the shape of almost every SDK-init/SDK-embedding call site anyway;
+ * genuinely mixed methods (SDK call interleaved with real app logic) lose that unrelated
+ * logic too when stubbed. Matching, unlike SmaliScissors' raw substring search over smali
+ * text, is reference-type-exact, so a string literal that happens to contain a target
+ * package name is never a false match.
  *
  * Any method with a pre-existing try/catch block (regardless of whether it references a
- * target) is routed straight to the whole-method stub, and that path clears the method's
- * try blocks before wiping its instructions. Shrinking a try range around one removed
- * instruction relies on dexlib2's label tracking, and wiping a method's entire body is
- * exactly the case that tracking does not recover from cleanly - it can leave a stale
- * try_item with a collapsed startAddr=0/endAddr=0 range instead of dropping it, which is a
- * hard VerifyError ("bad exception entry") at class-load time. A stubbed body has nothing
- * left to catch anyway.
+ * target) is also routed to the whole-method stub rather than the surgical path, and that
+ * path clears the method's try blocks before wiping its instructions. Shrinking a try
+ * range around one removed/replaced instruction relies on dexlib2's label tracking, and
+ * wiping a method's entire body is exactly the case that tracking does not recover from
+ * cleanly - it can leave a stale try_item with a collapsed startAddr=0/endAddr=0 range
+ * instead of dropping it, which is a hard VerifyError ("bad exception entry") at
+ * class-load time. A stubbed body has nothing left to catch anyway.
  */
 
-private fun String.isTarget(prefixes: List<String>): Boolean {
-    for (raw in prefixes) {
-        if (startsWith(raw)) return true
-        if (raw.endsWith("/")) {
-            val base = raw.substring(0, raw.length - 1)
-            if (this == "$base;" || startsWith("$base\$")) return true
-        }
-    }
-    return false
-}
+private fun String.isTarget(prefixes: Collection<String>) = prefixes.any { startsWith(it) }
 
-private fun Instruction.referencesTarget(prefixes: List<String>): Boolean {
+private fun Instruction.referencesTarget(prefixes: Collection<String>): Boolean {
     val ref = (this as? ReferenceInstruction)?.reference ?: return false
     return when (ref) {
         is MethodReference -> ref.definingClass.isTarget(prefixes) ||
@@ -95,51 +73,6 @@ private fun Instruction.referencesTarget(prefixes: List<String>): Boolean {
         is TypeReference -> ref.type.isTarget(prefixes)
         else -> false
     }
-}
-
-/** Every register this instruction touches, read or write alike - used only for the
- *  escape check, so a coarse read+write union is fine (and safer: treating a coincidental
- *  write to the same register number as a "use" only makes the check MORE conservative,
- *  never less). Formats not covered here (no register operand at all - goto, return-void,
- *  nop, ...) correctly contribute nothing. */
-private fun Instruction.allRegisters(): Set<Int> {
-    val regs = HashSet<Int>()
-    when (this) {
-        is RegisterRangeInstruction -> for (r in startRegister until startRegister + registerCount) regs += r
-        is FiveRegisterInstruction -> {
-            val c = registerCount
-            if (c >= 1) regs += registerC
-            if (c >= 2) regs += registerD
-            if (c >= 3) regs += registerE
-            if (c >= 4) regs += registerF
-            if (c >= 5) regs += registerG
-        }
-        is ThreeRegisterInstruction -> { regs += registerA; regs += registerB; regs += registerC }
-        is TwoRegisterInstruction -> { regs += registerA; regs += registerB }
-        is OneRegisterInstruction -> regs += registerA
-    }
-    return regs
-}
-
-/** The register this instruction freshly defines, for the specific shapes that appear as
- *  seeds in the removable set. Plain invoke/iput/sput never define a numbered register
- *  directly (an invoke's result, if any, is captured by a separate move-result*), so they
- *  correctly return null - they contribute nothing to escape-check, which is right: they
- *  have nothing downstream could depend on other than via that separate move-result. */
-private fun Instruction.definedRegister(): Int? = when {
-    opcode.name.startsWith("MOVE_RESULT") -> (this as OneRegisterInstruction).registerA
-    opcode == Opcode.NEW_INSTANCE || opcode == Opcode.CONST_CLASS || opcode == Opcode.CHECK_CAST ->
-        (this as OneRegisterInstruction).registerA
-    opcode == Opcode.INSTANCE_OF || opcode == Opcode.NEW_ARRAY -> (this as TwoRegisterInstruction).registerA
-    else -> null
-}
-
-/** The register an invoke's own object argument sits in (its arg0/"this") - used only to
- *  trace an <init> call back to the new-instance that created the object being initialized. */
-private fun Instruction.firstArgRegister(): Int? = when (this) {
-    is RegisterRangeInstruction -> startRegister
-    is FiveRegisterInstruction -> if (registerCount >= 1) registerC else null
-    else -> null
 }
 
 private fun minimalReturnFor(returnType: String): String = when (returnType) {
@@ -192,38 +125,22 @@ private fun BytecodePatchContext.forceFullBytecodeMode() {
         .set(config, BytecodeMode.FULL)
 }
 
-private fun stubWholeMethod(
-    mutableMethod: app.morphe.patcher.util.proxy.mutableTypes.MutableMethod,
-    impl: MutableMethodImplementation,
-    effectiveSuper: String,
-) {
-    clearTryBlocks(impl)
-    val count = mutableMethod.instructions.size
-    mutableMethod.removeInstructions(0, count)
-    when (mutableMethod.name) {
-        "<init>" -> mutableMethod.addInstructions(
-            0, "invoke-direct {p0}, $effectiveSuper-><init>()V\nreturn-void"
-        )
-
-        "<clinit>" -> mutableMethod.addInstructions(0, "return-void")
-        else -> mutableMethod.addInstructions(0, minimalReturnFor(mutableMethod.returnType))
-    }
-}
-
-fun BytecodePatchContext.removeCodeByPrefix(tag: String, prefixes: List<String>) {
-    val logger = Logger.getLogger("RemoveCode:$tag")
-    val deletedClasses = HashSet<String>()
+private class RoundResult {
     var deletedMethods = 0
     var stubbedMethods = 0
-    var editedMethods = 0
+    val orphanedClasses = HashSet<String>()
+}
 
-    classDefForEach { classDef ->
-        if (classDef.type.isTarget(prefixes)) deletedClasses += classDef.type
-    }
-    if (deletedClasses.isEmpty()) {
-        logger.info("no matching classes")
-        return
-    }
+/** One full sweep over every surviving class - identical to the original single-pass
+ *  engine - except a class that ends up with no meaningful body left, and only had one
+ *  because its superclass/interface was a target, is reported back as newly orphaned so
+ *  the caller can fold it into next round's target set (SmaliScissors cascade). */
+private fun BytecodePatchContext.runRound(
+    prefixes: Collection<String>,
+    deletedClasses: MutableSet<String>,
+    logger: Logger,
+): RoundResult {
+    val result = RoundResult()
 
     classDefForEach classLoop@{ classDef ->
         if (classDef.type in deletedClasses) return@classLoop
@@ -262,112 +179,70 @@ fun BytecodePatchContext.removeCodeByPrefix(tag: String, prefixes: List<String>)
                     mutableMethod.parameterTypes.any { it.toString().isTarget(prefixes) }
             if (sigIsTarget) {
                 mutableClass.methods.remove(mutableMethod)
-                deletedMethods++
+                result.deletedMethods++
                 logger.fine("delete method (signature): ${classDef.type}->${method.name}")
                 continue
             }
 
             val impl = mutableMethod.implementation ?: continue
-
-            // ANY pre-existing try/catch - target-related or not - goes straight to the
-            // whole-method stub; see the file header for why.
-            if (impl.tryBlocks.isNotEmpty()) {
-                stubbedMethods++
-                logger.fine("stub method (has try/catch): ${classDef.type}->${mutableMethod.name}")
-                stubWholeMethod(mutableMethod, impl, effectiveSuper)
-                continue
-            }
-
             val insns = impl.instructions.toList()
-            val removable = BooleanArray(insns.size)
-            val fieldReadEdits = HashMap<Int, String>()
 
-            for ((index, insn) in insns.withIndex()) {
-                if (!insn.referencesTarget(prefixes)) continue
-                val opName = insn.opcode.name
-                when {
-                    opName.startsWith("INVOKE_") -> {
-                        removable[index] = true
-                        val next = insns.getOrNull(index + 1)
-                        if (next != null && next.opcode.name.startsWith("MOVE_RESULT")) {
-                            removable[index + 1] = true
+            // ANY pre-existing try/catch - target-related or not - disqualifies the
+            // surgical path entirely; see the file header for why.
+            var allSurgical = impl.tryBlocks.isEmpty()
+            val surgicalEdits = ArrayList<Pair<Int, String?>>()   // index -> replacement smali, null = remove
+            if (allSurgical) {
+                for ((index, insn) in insns.withIndex()) {
+                    if (!allSurgical) break
+                    if (!insn.referencesTarget(prefixes)) continue
+                    val opName = insn.opcode.name
+                    when {
+                        opName.startsWith("INVOKE_") -> {
+                            val ref = (insn as ReferenceInstruction).reference as MethodReference
+                            if (ref.returnType == "V" && ref.name != "<init>") {
+                                surgicalEdits += index to null
+                            } else {
+                                allSurgical = false
+                            }
                         }
-                    }
 
-                    opName.startsWith("SGET") || opName.startsWith("IGET") -> {
-                        val fieldType = ((insn as ReferenceInstruction).reference as FieldReference).type
-                        val reg = (insn as OneRegisterInstruction).registerA
-                        fieldReadEdits[index] = zeroLoadFor(reg, fieldType)
-                    }
-
-                    opName.startsWith("SPUT") || opName.startsWith("IPUT") -> removable[index] = true
-
-                    else -> removable[index] = true   // new-instance/check-cast/instance-of/
-                    // new-array/filled-new-array/const-class
-                }
-            }
-
-            if (!removable.any { it } && fieldReadEdits.isEmpty()) continue
-
-            // Constructor safety: an <init> invoke may only be removed if the object it
-            // initializes (its first argument register) was itself created by a new-instance
-            // that is ALSO removable in this same pass. Otherwise removing just the <init>
-            // call would leave a live, permanently-uninitialized reference behind for
-            // whatever legitimately still uses it - a hard VerifyError. This only bites the
-            // rare case of a non-target class whose constructor merely happens to take a
-            // target-typed parameter; the ordinary case (both new-instance and <init> refer
-            // to the same target class) is already self-consistent since both independently
-            // match referencesTarget().
-            var safe = true
-            for ((index, insn) in insns.withIndex()) {
-                if (!removable[index]) continue
-                if (insn.opcode.name.startsWith("INVOKE_") &&
-                    (insn as ReferenceInstruction).reference.let { it is MethodReference && it.name == "<init>" }
-                ) {
-                    val selfReg = insn.firstArgRegister()
-                    val ownerIdx = selfReg?.let { reg ->
-                        insns.take(index).indexOfLast {
-                            it.opcode == Opcode.NEW_INSTANCE && (it as OneRegisterInstruction).registerA == reg
+                        opName.startsWith("SGET") || opName.startsWith("IGET") -> {
+                            val fieldType = ((insn as ReferenceInstruction).reference as FieldReference).type
+                            val reg = (insn as OneRegisterInstruction).registerA
+                            surgicalEdits += index to zeroLoadFor(reg, fieldType)
                         }
-                    } ?: -1
-                    if (ownerIdx == -1 || !removable[ownerIdx]) {
-                        safe = false
-                        break
+
+                        opName.startsWith("SPUT") || opName.startsWith("IPUT") -> {
+                            surgicalEdits += index to null
+                        }
+
+                        else -> allSurgical = false
                     }
                 }
             }
 
-            // Escape check: for every register a removable instruction defines, is it read
-            // by anything NOT in the removable set? If any write escapes, the whole block
-            // can't be excised without risking a dangling/uninitialized value for whatever
-            // still reads it outside - fall back to the whole-method stub.
-            if (safe) {
-                outer@ for ((index, insn) in insns.withIndex()) {
-                    if (!removable[index]) continue
-                    val written = insn.definedRegister() ?: continue
-                    for ((j, other) in insns.withIndex()) {
-                        if (removable[j]) continue
-                        if (written in other.allRegisters()) {
-                            safe = false
-                            break@outer
-                        }
-                    }
-                }
-            }
-
-            if (safe) {
-                editedMethods++
-                val ops = ArrayList<Pair<Int, String?>>()
-                fieldReadEdits.forEach { (index, smali) -> ops += index to smali }
-                removable.forEachIndexed { index, r -> if (r) ops += index to null }
-                ops.sortedByDescending { it.first }.forEach { (index, smali) ->
+            if (allSurgical && surgicalEdits.isNotEmpty()) {
+                surgicalEdits.sortedByDescending { it.first }.forEach { (index, smali) ->
                     if (smali == null) mutableMethod.removeInstruction(index)
                     else mutableMethod.replaceInstruction(index, smali)
                 }
             } else {
-                stubbedMethods++
-                logger.fine("stub method (unsafe instruction): ${classDef.type}->${mutableMethod.name}")
-                stubWholeMethod(mutableMethod, impl, effectiveSuper)
+                result.stubbedMethods++
+                logger.fine(
+                    "stub method (${if (impl.tryBlocks.isEmpty()) "unsafe instruction" else "has try/catch"}): " +
+                            "${classDef.type}->${mutableMethod.name}"
+                )
+                clearTryBlocks(impl)
+                val count = mutableMethod.instructions.size
+                mutableMethod.removeInstructions(0, count)
+                when (mutableMethod.name) {
+                    "<init>" -> mutableMethod.addInstructions(
+                        0, "invoke-direct {p0}, $effectiveSuper-><init>()V\nreturn-void"
+                    )
+
+                    "<clinit>" -> mutableMethod.addInstructions(0, "return-void")
+                    else -> mutableMethod.addInstructions(0, minimalReturnFor(mutableMethod.returnType))
+                }
             }
         }
 
@@ -394,15 +269,137 @@ fun BytecodePatchContext.removeCodeByPrefix(tag: String, prefixes: List<String>)
                 ?.let { it.size == 1 && it[0].opcode == Opcode.RETURN_VOID } == true
         }
         if (emptyClinit != null) mutableClass.methods.remove(emptyClinit)
+
+        // Nothing left but constructors, and the only reason this class existed at all was
+        // to extend/implement a target - it's a pure SDK wrapper/listener shell now. Delete
+        // it outright and hand its own type back as a new target: whatever still holds a
+        // reference to it (a field, a listener registration, a new-instance call) gets
+        // cleaned by the next round exactly like a reference to the original SDK class would.
+        val hasRemainingBody = mutableClass.methods.any { it.name !in setOf("<init>", "<clinit>") } ||
+                mutableClass.fields.isNotEmpty()
+        if (!hasRemainingBody && (superIsTarget || targetInterfaces.isNotEmpty())) {
+            result.orphanedClasses += classDef.type
+        }
     }
+
+    return result
+}
+
+/** Reference-count sweep, run only after the round loop above has converged. A class under
+ *  one of [sweepPrefixes] is deleted once a full scan finds no surviving class (anywhere,
+ *  not just among sweep candidates) still mentioning it - as a superclass, interface, field
+ *  type, method signature type, or any instruction reference. Repeated to a fixed point:
+ *  deleting one orphan can orphan another (e.g. a zzB that only zzA used, once zzA itself
+ *  was just swept). Deliberately never applied to TARGETS - only to SWEEP_ROOTS, which by
+ *  construction the caller has picked because nothing outside the SDK's own internals ever
+ *  names them, so this can't accidentally eat a class the app (or the manifest) still needs. */
+private fun BytecodePatchContext.sweepUnreferenced(
+    sweepPrefixes: Collection<String>,
+    deletedClasses: MutableSet<String>,
+): Int {
+    if (sweepPrefixes.isEmpty()) return 0
+    var totalSwept = 0
+
+    while (true) {
+        val stillReferenced = HashSet<String>()
+
+        classDefForEach { classDef ->
+            if (classDef.type in deletedClasses) return@classDefForEach
+            classDef.superclass?.let { stillReferenced += it }
+            stillReferenced += classDef.interfaces
+            classDef.fields.forEach { stillReferenced += it.type }
+            classDef.methods.forEach { method ->
+                stillReferenced += method.returnType
+                method.parameterTypes.forEach { stillReferenced += it.toString() }
+                method.implementation?.instructions?.forEach { insn ->
+                    val ref = (insn as? ReferenceInstruction)?.reference ?: return@forEach
+                    when (ref) {
+                        is MethodReference -> {
+                            stillReferenced += ref.definingClass
+                            stillReferenced += ref.returnType
+                            ref.parameterTypes.forEach { stillReferenced += it.toString() }
+                        }
+
+                        is FieldReference -> {
+                            stillReferenced += ref.definingClass
+                            stillReferenced += ref.type
+                        }
+
+                        is TypeReference -> stillReferenced += ref.type
+                    }
+                }
+                method.implementation?.tryBlocks?.forEach { tb ->
+                    tb.exceptionHandlers.forEach { it.exceptionType?.let { t -> stillReferenced += t } }
+                }
+            }
+        }
+
+        val orphaned = HashSet<String>()
+        classDefForEach { classDef ->
+            if (classDef.type in deletedClasses) return@classDefForEach
+            if (classDef.type.isTarget(sweepPrefixes) && classDef.type !in stillReferenced) {
+                orphaned += classDef.type
+            }
+        }
+
+        if (orphaned.isEmpty()) return totalSwept
+        deletedClasses += orphaned
+        totalSwept += orphaned.size
+    }
+}
+
+/**
+ * @param prefixes Hard targets: deleted unconditionally, every remaining reference to them
+ *   cleaned (or the referencing method/class deleted in turn) over as many rounds as it
+ *   takes to converge. Use for anything the app itself calls directly.
+ * @param sweepPrefixes Soft targets: deleted only once nothing outside the already-deleted
+ *   set still references them, checked after the round loop above has converged. Use only
+ *   for SDK-internal implementation packages nothing else ever names directly - never for
+ *   anything the app's own code, or the manifest, could plausibly reference.
+ */
+fun BytecodePatchContext.removeCodeByPrefix(
+    tag: String,
+    prefixes: List<String>,
+    sweepPrefixes: List<String> = emptyList(),
+) {
+    val logger = Logger.getLogger("RemoveCode:$tag")
+    val deletedClasses = HashSet<String>()
+    val currentPrefixes = prefixes.toMutableSet()
+    var deletedMethods = 0
+    var stubbedMethods = 0
+    var round = 0
+
+    while (true) {
+        round++
+
+        classDefForEach { classDef ->
+            if (classDef.type.isTarget(currentPrefixes)) deletedClasses += classDef.type
+        }
+        if (deletedClasses.isEmpty()) {
+            logger.info("no matching classes")
+            return
+        }
+
+        val result = runRound(currentPrefixes, deletedClasses, logger)
+        deletedMethods += result.deletedMethods
+        stubbedMethods += result.stubbedMethods
+
+        val newlyOrphaned = result.orphanedClasses.filterNot { it in deletedClasses }
+        if (newlyOrphaned.isEmpty()) break
+        logger.fine("round $round: cascading ${newlyOrphaned.size} now-empty wrapper class(es)")
+        deletedClasses += newlyOrphaned
+        currentPrefixes += newlyOrphaned
+    }
+
+    val swept = sweepUnreferenced(sweepPrefixes, deletedClasses)
 
     forceFullBytecodeMode()
     val classMap = internalClassMap()
     var removed = 0
     deletedClasses.forEach { if (classMap.remove(it) != null) removed++ }
     logger.info(
-        "\"$tag\": removed $removed classes, deleted $deletedMethods methods (signature match), " +
-                "edited $editedMethods methods (surgical), stubbed $stubbedMethods methods " +
+        "\"$tag\": removed $removed classes ($swept via reachability sweep) over $round round(s), " +
+                "deleted $deletedMethods methods (signature match), stubbed $stubbedMethods methods " +
                 "(set Level.FINE on logger \"RemoveCode:$tag\" for the per-method list)"
     )
 }

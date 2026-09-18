@@ -275,3 +275,12 @@ val ANALYTICS_TARGETS: List<String> = listOf(
     "Ltealium/",
     "Ltv/alphonso/service/",
 )
+
+/**
+ * SDK-internal implementation package: never called by app code or declared in a
+ * manifest, only ever called BY the ANALYTICS_TARGETS classes above. Deleted only once
+ * the reachability sweep confirms nothing outside the deleted set still references it.
+ */
+val ANALYTICS_SWEEP_ROOTS: List<String> = listOf(
+    "Lcom/google/android/gms/internal/measurement/",
+)
