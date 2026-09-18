@@ -75,11 +75,15 @@ private fun Instruction.referencesTarget(prefixes: Collection<String>): Boolean 
     }
 }
 
-private fun minimalReturnFor(returnType: String): String = when (returnType) {
-    "V" -> "return-void"
-    "Z", "B", "C", "S", "I", "F" -> "const/4 v0, 0x0\nreturn v0"
-    "J", "D" -> "const-wide/16 v0, 0x0\nreturn-wide v0"
-    else -> "const/4 v0, 0x0\nreturn-object v0"
+/** One instruction per list element - InlineSmaliCompiler compiles each addInstructions()
+ *  string as a single instruction; a "line1\nline2" blob in one call parses as zero
+ *  instructions instead of two (NoSuchElementException from an empty result), so a
+ *  multi-instruction stub body must go in as separate calls at increasing indices. */
+private fun minimalReturnFor(returnType: String): List<String> = when (returnType) {
+    "V" -> listOf("return-void")
+    "Z", "B", "C", "S", "I", "F" -> listOf("const/4 v0, 0x0", "return v0")
+    "J", "D" -> listOf("const-wide/16 v0, 0x0", "return-wide v0")
+    else -> listOf("const/4 v0, 0x0", "return-object v0")
 }
 
 private fun zeroLoadFor(reg: Int, type: String): String = when (type) {
@@ -235,14 +239,12 @@ private fun BytecodePatchContext.runRound(
                 clearTryBlocks(impl)
                 val count = mutableMethod.instructions.size
                 mutableMethod.removeInstructions(0, count)
-                when (mutableMethod.name) {
-                    "<init>" -> mutableMethod.addInstructions(
-                        0, "invoke-direct {p0}, $effectiveSuper-><init>()V\nreturn-void"
-                    )
-
-                    "<clinit>" -> mutableMethod.addInstructions(0, "return-void")
-                    else -> mutableMethod.addInstructions(0, minimalReturnFor(mutableMethod.returnType))
+                val stubBody = when (mutableMethod.name) {
+                    "<init>" -> listOf("invoke-direct {p0}, $effectiveSuper-><init>()V", "return-void")
+                    "<clinit>" -> listOf("return-void")
+                    else -> minimalReturnFor(mutableMethod.returnType)
                 }
+                stubBody.forEachIndexed { offset, line -> mutableMethod.addInstructions(offset, line) }
             }
         }
 
