@@ -350,14 +350,87 @@ private fun BytecodePatchContext.runRound(
     return result
 }
 
+/** Same two provably-safe edits as runRound's surgical path - a non-&lt;init&gt; void invoke
+ *  removed, a field read zeroed, a field write removed - but for SWEEP_ROOTS references
+ *  found in classes runRound never even looks at (it only scans against the hard TARGETS
+ *  list). This is the actual reason a class like internal/ads/zzXXX stayed "referenced"
+ *  and unsweepable: some surviving, non-target class held a field or call typed to it, and
+ *  nothing ever cleaned that up. Deliberately no whole-method stub fallback and no method
+ *  deletion here - unlike a hard target, a sweep candidate isn't guaranteed to be deleted at
+ *  all, so forcing a stub on the strength of a reference that might not even end up
+ *  mattering would be destructive for no guaranteed benefit. Anything not one of the two
+ *  safe shapes (or inside a try/catch, same VerifyError risk as runRound) is left alone -
+ *  that reference legitimately keeps the candidate alive and the sweep correctly won't
+ *  remove it. Declared fields typed to a sweep candidate are dropped outright once their
+ *  own accesses are scrubbed, same as runRound's hasTargetField handling. */
+private fun BytecodePatchContext.scrubSweepReferences(
+    sweepPrefixes: Collection<String>,
+    deletedClasses: MutableSet<String>,
+) {
+    classDefForEach classLoop@{ classDef ->
+        if (classDef.type in deletedClasses) return@classLoop
+
+        val hasSweepField = classDef.fields.any { it.type.isTarget(sweepPrefixes) }
+        val methodsNeedingWork = classDef.methods.filter { method ->
+            method.implementation?.instructions?.any { it.referencesTarget(sweepPrefixes) } == true
+        }
+        if (!hasSweepField && methodsNeedingWork.isEmpty()) return@classLoop
+
+        val mutableClass = mutableClassDefBy(classDef.type)
+
+        for (method in methodsNeedingWork) {
+            val mutableMethod = mutableClass.methods.firstOrNull { m ->
+                m.name == method.name && m.returnType == method.returnType &&
+                        m.parameterTypes.map { it.toString() } == method.parameterTypes.map { it.toString() }
+            } ?: continue
+            val impl = mutableMethod.implementation ?: continue
+            if (impl.tryBlocks.isNotEmpty()) continue
+
+            val edits = ArrayList<Pair<Int, String?>>()
+            for ((index, insn) in impl.instructions.toList().withIndex()) {
+                if (!insn.referencesTarget(sweepPrefixes)) continue
+                val opName = insn.opcode.name
+                when {
+                    opName.startsWith("INVOKE_") -> {
+                        val ref = (insn as ReferenceInstruction).reference as MethodReference
+                        if (ref.returnType == "V" && ref.name != "<init>") edits += index to null
+                    }
+
+                    opName.startsWith("SGET") || opName.startsWith("IGET") -> {
+                        val fieldType = ((insn as ReferenceInstruction).reference as FieldReference).type
+                        val reg = (insn as OneRegisterInstruction).registerA
+                        edits += index to zeroLoadFor(reg, fieldType)
+                    }
+
+                    opName.startsWith("SPUT") || opName.startsWith("IPUT") -> edits += index to null
+                    // Anything else (non-void invoke, new-instance, check-cast...) is left
+                    // exactly as-is - not one of the safe shapes, so this reference stands.
+                }
+            }
+            if (edits.isNotEmpty()) {
+                edits.sortedByDescending { it.first }.forEach { (index, smali) ->
+                    if (smali == null) mutableMethod.removeInstruction(index)
+                    else mutableMethod.replaceInstruction(index, smali)
+                }
+            }
+        }
+
+        if (hasSweepField) {
+            mutableClass.fields.removeAll { it.type.isTarget(sweepPrefixes) }
+        }
+    }
+}
+
 /** Reference-count sweep, run only after the round loop above has converged. A class under
  *  one of [sweepPrefixes] is deleted once a full scan finds no surviving class (anywhere,
  *  not just among sweep candidates) still mentioning it - as a superclass, interface, field
- *  type, method signature type, or any instruction reference. Repeated to a fixed point:
- *  deleting one orphan can orphan another (e.g. a zzB that only zzA used, once zzA itself
- *  was just swept). Deliberately never applied to TARGETS - only to SWEEP_ROOTS, which by
- *  construction the caller has picked because nothing outside the SDK's own internals ever
- *  names them, so this can't accidentally eat a class the app (or the manifest) still needs. */
+ *  type, method signature type, or any instruction reference. Each round first runs
+ *  [scrubSweepReferences] to clear whatever's safely removable before checking what's left,
+ *  then repeats to a fixed point: deleting one orphan can orphan another (e.g. a zzB that
+ *  only zzA used, once zzA itself was just swept). Deliberately never applied to TARGETS -
+ *  only to SWEEP_ROOTS, which by construction the caller has picked because nothing outside
+ *  the SDK's own internals ever names them, so this can't accidentally eat a class the app
+ *  (or the manifest) still needs. */
 private fun BytecodePatchContext.sweepUnreferenced(
     sweepPrefixes: Collection<String>,
     deletedClasses: MutableSet<String>,
@@ -366,6 +439,8 @@ private fun BytecodePatchContext.sweepUnreferenced(
     var totalSwept = 0
 
     while (true) {
+        scrubSweepReferences(sweepPrefixes, deletedClasses)
+
         val stillReferenced = HashSet<String>()
 
         classDefForEach { classDef ->
