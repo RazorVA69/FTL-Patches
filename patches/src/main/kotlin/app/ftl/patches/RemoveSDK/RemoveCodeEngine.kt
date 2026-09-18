@@ -75,10 +75,10 @@ private fun Instruction.referencesTarget(prefixes: Collection<String>): Boolean 
     }
 }
 
-/** One instruction per list element - InlineSmaliCompiler compiles each addInstructions()
- *  string as a single instruction; a "line1\nline2" blob in one call parses as zero
- *  instructions instead of two (NoSuchElementException from an empty result), so a
- *  multi-instruction stub body must go in as separate calls at increasing indices. */
+/** One instruction per list element so the call site can insert them before removing the
+ *  method's old body (see the stub-body block in runRound for why that order matters -
+ *  it's not about single- vs multi-line smali, InlineSmaliCompiler handles multi-line
+ *  fine per Morphe's own docs). */
 private fun minimalReturnFor(returnType: String): List<String> = when (returnType) {
     "V" -> listOf("return-void")
     "Z", "B", "C", "S", "I", "F" -> listOf("const/4 v0, 0x0", "return v0")
@@ -132,6 +132,7 @@ private fun BytecodePatchContext.forceFullBytecodeMode() {
 private class RoundResult {
     var deletedMethods = 0
     var stubbedMethods = 0
+    var failedMethods = 0
     val orphanedClasses = HashSet<String>()
 }
 
@@ -231,20 +232,36 @@ private fun BytecodePatchContext.runRound(
                     else mutableMethod.replaceInstruction(index, smali)
                 }
             } else {
-                result.stubbedMethods++
-                logger.fine(
-                    "stub method (${if (impl.tryBlocks.isEmpty()) "unsafe instruction" else "has try/catch"}): " +
-                            "${classDef.type}->${mutableMethod.name}"
-                )
                 clearTryBlocks(impl)
-                val count = mutableMethod.instructions.size
-                mutableMethod.removeInstructions(0, count)
+                val originalCount = mutableMethod.instructions.size
                 val stubBody = when (mutableMethod.name) {
                     "<init>" -> listOf("invoke-direct {p0}, $effectiveSuper-><init>()V", "return-void")
                     "<clinit>" -> listOf("return-void")
                     else -> minimalReturnFor(mutableMethod.returnType)
                 }
-                stubBody.forEachIndexed { offset, line -> mutableMethod.addInstructions(offset, line) }
+                try {
+                    // Insert before removing: compiling against a method already wiped to
+                    // zero instructions is what actually broke here, not multi-instruction
+                    // content - this exact invoke-direct snippet already works fine via
+                    // replaceInstruction elsewhere in this file, on a method that still has
+                    // its original body.
+                    stubBody.forEachIndexed { offset, line -> mutableMethod.addInstructions(offset, line) }
+                    mutableMethod.removeInstructions(stubBody.size, originalCount)
+                    result.stubbedMethods++
+                    logger.fine(
+                        "stub method (${if (impl.tryBlocks.isEmpty()) "unsafe instruction" else "has try/catch"}): " +
+                                "${classDef.type}->${mutableMethod.name}"
+                    )
+                } catch (e: Exception) {
+                    result.failedMethods++
+                    logger.severe(
+                        "FAILED to stub ${classDef.type}->${mutableMethod.name}" +
+                                "(${mutableMethod.parameterTypes.joinToString(",")})${mutableMethod.returnType} " +
+                                "- method left as-is, may still reference a deleted class: " +
+                                "stubBody=$stubBody effectiveSuper=$effectiveSuper originalCount=$originalCount " +
+                                "registerCount=${impl.registerCount} - ${e.javaClass.name}: ${e.message}"
+                    )
+                }
             }
         }
 
@@ -369,6 +386,7 @@ fun BytecodePatchContext.removeCodeByPrefix(
     val currentPrefixes = prefixes.toMutableSet()
     var deletedMethods = 0
     var stubbedMethods = 0
+    var failedMethods = 0
     var round = 0
 
     while (true) {
@@ -385,6 +403,7 @@ fun BytecodePatchContext.removeCodeByPrefix(
         val result = runRound(currentPrefixes, deletedClasses, logger)
         deletedMethods += result.deletedMethods
         stubbedMethods += result.stubbedMethods
+        failedMethods += result.failedMethods
 
         val newlyOrphaned = result.orphanedClasses.filterNot { it in deletedClasses }
         if (newlyOrphaned.isEmpty()) break
@@ -401,7 +420,8 @@ fun BytecodePatchContext.removeCodeByPrefix(
     deletedClasses.forEach { if (classMap.remove(it) != null) removed++ }
     logger.info(
         "\"$tag\": removed $removed classes ($swept via reachability sweep) over $round round(s), " +
-                "deleted $deletedMethods methods (signature match), stubbed $stubbedMethods methods " +
+                "deleted $deletedMethods methods (signature match), stubbed $stubbedMethods methods, " +
+                "$failedMethods method(s) FAILED to stub (see Level.SEVERE above if >0) " +
                 "(set Level.FINE on logger \"RemoveCode:$tag\" for the per-method list)"
     )
 }
