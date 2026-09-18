@@ -10,6 +10,8 @@ val removeAdsCodePatch = bytecodePatch(
     description = "Deletes bundled ad-network SDK classes and scrubs every remaining reference to them.",
     default = true,
 ) {
+    dependsOn(collectManifestProtectedClassesPatch)
+
     execute {
         removeCodeByPrefix("ads", ADS_TARGETS, ADS_SWEEP_ROOTS)
     }

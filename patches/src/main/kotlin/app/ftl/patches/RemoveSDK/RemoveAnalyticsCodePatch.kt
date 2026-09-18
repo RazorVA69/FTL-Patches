@@ -10,6 +10,8 @@ val removeAnalyticsCodePatch = bytecodePatch(
     description = "Deletes bundled analytics/tracking SDK classes and scrubs every remaining reference to them.",
     default = true,
 ) {
+    dependsOn(collectManifestProtectedClassesPatch)
+
     execute {
         removeCodeByPrefix("analytics", ANALYTICS_TARGETS, ANALYTICS_SWEEP_ROOTS)
     }

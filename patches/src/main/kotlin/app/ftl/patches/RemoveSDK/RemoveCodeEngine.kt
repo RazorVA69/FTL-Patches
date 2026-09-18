@@ -59,6 +59,15 @@ import java.util.logging.Logger
  * cleanly - it can leave a stale try_item with a collapsed startAddr=0/endAddr=0 range
  * instead of dropping it, which is a hard VerifyError ("bad exception entry") at
  * class-load time. A stubbed body has nothing left to catch anyway.
+ *
+ * A class can also be a live entry point with zero bytecode references anywhere - the
+ * classic case is an SDK's auto-init ContentProvider (e.g. Google Mobile Ads'
+ * MobileAdsInitProvider), declared in AndroidManifest.xml and instantiated by the OS via
+ * reflection at process start, which no dex-reference scan can ever see. Both TARGETS and
+ * SWEEP_ROOTS deletion defer to [manifestProtectedClasses] (see ManifestProtectedClasses.kt)
+ * before ever adding a class to the deleted set - same role SmaliScissors' SmaliKeeper
+ * plays. A protected class still gets its own SDK-referencing methods cleaned/stubbed like
+ * any other surviving class; only the class itself is exempt from deletion.
  */
 
 private fun String.isTarget(prefixes: Collection<String>) = prefixes.any { startsWith(it) }
@@ -331,7 +340,9 @@ private fun BytecodePatchContext.runRound(
         // cleaned by the next round exactly like a reference to the original SDK class would.
         val hasRemainingBody = mutableClass.methods.any { it.name !in setOf("<init>", "<clinit>") } ||
                 mutableClass.fields.isNotEmpty()
-        if (!hasRemainingBody && (superIsTarget || targetInterfaces.isNotEmpty())) {
+        if (!hasRemainingBody && (superIsTarget || targetInterfaces.isNotEmpty()) &&
+            classDef.type !in manifestProtectedClasses
+        ) {
             result.orphanedClasses += classDef.type
         }
     }
@@ -391,7 +402,9 @@ private fun BytecodePatchContext.sweepUnreferenced(
         val orphaned = HashSet<String>()
         classDefForEach { classDef ->
             if (classDef.type in deletedClasses) return@classDefForEach
-            if (classDef.type.isTarget(sweepPrefixes) && classDef.type !in stillReferenced) {
+            if (classDef.type.isTarget(sweepPrefixes) && classDef.type !in stillReferenced &&
+                classDef.type !in manifestProtectedClasses
+            ) {
                 orphaned += classDef.type
             }
         }
@@ -428,7 +441,9 @@ fun BytecodePatchContext.removeCodeByPrefix(
         round++
 
         classDefForEach { classDef ->
-            if (classDef.type.isTarget(currentPrefixes)) deletedClasses += classDef.type
+            if (classDef.type.isTarget(currentPrefixes) && classDef.type !in manifestProtectedClasses) {
+                deletedClasses += classDef.type
+            }
         }
         if (deletedClasses.isEmpty()) {
             logger.info("no matching classes")
