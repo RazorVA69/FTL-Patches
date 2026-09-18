@@ -362,13 +362,24 @@ private fun BytecodePatchContext.runRound(
  *  safe shapes (or inside a try/catch, same VerifyError risk as runRound) is left alone -
  *  that reference legitimately keeps the candidate alive and the sweep correctly won't
  *  remove it. Declared fields typed to a sweep candidate are dropped outright once their
- *  own accesses are scrubbed, same as runRound's hasTargetField handling. */
+ *  own accesses are scrubbed, same as runRound's hasTargetField handling.
+ *
+ *  Deliberately skips classes that are THEMSELVES a sweep candidate: internal SDK packages
+ *  are typically a densely interconnected web (hundreds of classes calling each other), and
+ *  a reference from one sweep candidate to another needs no editing at all - once the
+ *  referencing class itself gets orphaned and added to deletedClasses, the next round's
+ *  stillReferenced recomputation stops counting its references automatically (dead classes
+ *  are skipped there too), which can cascade to orphan the class it was pointing at. Editing
+ *  those internal cross-references anyway was pure waste: most aren't one of the two safe
+ *  shapes regardless (real construction/usage, not void calls or bare field access), so it
+ *  bloated the diff against surviving classes for no gain in what actually got removed. */
 private fun BytecodePatchContext.scrubSweepReferences(
     sweepPrefixes: Collection<String>,
     deletedClasses: MutableSet<String>,
 ) {
     classDefForEach classLoop@{ classDef ->
         if (classDef.type in deletedClasses) return@classLoop
+        if (classDef.type.isTarget(sweepPrefixes)) return@classLoop
 
         val hasSweepField = classDef.fields.any { it.type.isTarget(sweepPrefixes) }
         val methodsNeedingWork = classDef.methods.filter { method ->
