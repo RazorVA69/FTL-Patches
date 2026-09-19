@@ -9,6 +9,7 @@ import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.patch.BytecodePatchContext
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
+import com.android.tools.smali.dexlib2.iface.ClassDef
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
@@ -32,14 +33,19 @@ import java.util.logging.Logger
  * Separately, SmaliScissors' output includes classes that were never in any target list
  * at all - e.g. com.google.android.gms.internal.ads - because nothing outside the SDK's
  * own top-level classes ever calls into them; once the top-level layer is gone, they're
- * simply unreferenced. That is reference counting, not cascade (cascade cleans callers of
- * a deleted class; this removes callees of a deleted class that nothing else still needs),
- * and it is handled as a distinct sweep phase over an explicit SWEEP_ROOTS list, run only
- * after every round above has converged. Sweep roots must never be able to overlap with
- * TARGETS entries that the app itself calls directly (e.g. the public
+ * simply unreachable. That is dead-code elimination, not cascade (cascade cleans callers
+ * of a deleted class; this removes callees that nothing reachable still needs), and it is
+ * handled as a distinct sweep phase over an explicit SWEEP_ROOTS list, run only after every
+ * round above has converged. It is mark-and-sweep from roots, not a bottom-up "is anything
+ * still mentioning me" check - the latter can never resolve a cluster of SWEEP_ROOTS classes
+ * that only reference each other (a manager and its listeners, a factory and what it builds),
+ * which internal SDK implementation packages are full of; reachability from every permanent
+ * survivor correctly identifies such a cluster as dead as a whole even with zero individual
+ * class ever showing a reference count of exactly zero. Sweep roots must never be able to
+ * overlap with TARGETS entries that the app itself calls directly (e.g. the public
  * com/google/android/gms/ads/ API surface) - those have to stay hard targets, cleaned via
  * the cascade above, precisely because the app DOES hold live references to them and a
- * reference-count sweep would just find those references and keep them.
+ * root can never legitimately need a sweep root kept alive by construction.
  *
  * Deliberate simplification vs. SmaliScissors: it tracks per-opcode register dataflow to
  * surgically excise a target reference from a method that also does unrelated work,
@@ -366,13 +372,12 @@ private fun BytecodePatchContext.runRound(
  *
  *  Deliberately skips classes that are THEMSELVES a sweep candidate: internal SDK packages
  *  are typically a densely interconnected web (hundreds of classes calling each other), and
- *  a reference from one sweep candidate to another needs no editing at all - once the
- *  referencing class itself gets orphaned and added to deletedClasses, the next round's
- *  stillReferenced recomputation stops counting its references automatically (dead classes
- *  are skipped there too), which can cascade to orphan the class it was pointing at. Editing
- *  those internal cross-references anyway was pure waste: most aren't one of the two safe
- *  shapes regardless (real construction/usage, not void calls or bare field access), so it
- *  bloated the diff against surviving classes for no gain in what actually got removed. */
+ *  a reference from one sweep candidate to another needs no editing at all - the mark-and-
+ *  sweep reachability pass below already ignores edges between sweep candidates that no
+ *  root ever reaches, cycles included. Editing those internal cross-references anyway was
+ *  pure waste: most aren't one of the two safe shapes regardless (real construction/usage,
+ *  not void calls or bare field access), so it bloated the diff against surviving classes
+ *  for no gain in what actually got removed. */
 private fun BytecodePatchContext.scrubSweepReferences(
     sweepPrefixes: Collection<String>,
     deletedClasses: MutableSet<String>,
@@ -432,73 +437,96 @@ private fun BytecodePatchContext.scrubSweepReferences(
     }
 }
 
-/** Reference-count sweep, run only after the round loop above has converged. A class under
- *  one of [sweepPrefixes] is deleted once a full scan finds no surviving class (anywhere,
- *  not just among sweep candidates) still mentioning it - as a superclass, interface, field
- *  type, method signature type, or any instruction reference. Each round first runs
- *  [scrubSweepReferences] to clear whatever's safely removable before checking what's left,
- *  then repeats to a fixed point: deleting one orphan can orphan another (e.g. a zzB that
- *  only zzA used, once zzA itself was just swept). Deliberately never applied to TARGETS -
- *  only to SWEEP_ROOTS, which by construction the caller has picked because nothing outside
- *  the SDK's own internals ever names them, so this can't accidentally eat a class the app
- *  (or the manifest) still needs. */
+/** Every type-like reference a class makes anywhere: superclass, interfaces, field types,
+ *  method signatures, every instruction's referenced type/method/field, and catch types. */
+private fun referencedTypesOf(classDef: ClassDef): Set<String> {
+    val refs = HashSet<String>()
+    classDef.superclass?.let { refs += it }
+    refs += classDef.interfaces
+    classDef.fields.forEach { refs += it.type }
+    classDef.methods.forEach { method ->
+        refs += method.returnType
+        method.parameterTypes.forEach { refs += it.toString() }
+        method.implementation?.instructions?.forEach { insn ->
+            val ref = (insn as? ReferenceInstruction)?.reference ?: return@forEach
+            when (ref) {
+                is MethodReference -> {
+                    refs += ref.definingClass
+                    refs += ref.returnType
+                    ref.parameterTypes.forEach { refs += it.toString() }
+                }
+
+                is FieldReference -> {
+                    refs += ref.definingClass
+                    refs += ref.type
+                }
+
+                is TypeReference -> refs += ref.type
+            }
+        }
+        method.implementation?.tryBlocks?.forEach { tb ->
+            tb.exceptionHandlers.forEach { it.exceptionType?.let { t -> refs += t } }
+        }
+    }
+    return refs
+}
+
+/** Mark-and-sweep, run only after the round loop above has converged, not a reference-count
+ *  check. Every surviving class that ISN'T itself a sweep candidate is a root - permanently
+ *  alive regardless of what references it. Anything a root references, directly or through
+ *  a chain of other sweep candidates, is transitively alive too. Any sweep candidate never
+ *  reached this way is genuinely dead and gets removed - including an entire cluster of
+ *  sweep candidates that only reference each other with no root ever pointing into it.
+ *
+ *  This matters specifically because internal SDK implementation packages are typically
+ *  full of exactly that shape - a manager holding a list of listener/callback objects that
+ *  hold a back-reference to the manager, factories instantiating helpers that reference the
+ *  factory back, and so on. A bottom-up "is anything still mentioning me" check can never
+ *  resolve a cycle like that: each member is always "referenced" by another member of the
+ *  same dead cluster, no matter how many rounds it re-checks. Reachability from roots is
+ *  the only correct way to identify a self-referential dead cluster as dead as a whole.
+ *
+ *  Runs [scrubSweepReferences] first so a root's own safely-removable reference into a
+ *  sweep candidate doesn't needlessly keep that candidate (and everything reachable from
+ *  it) alive. Deliberately never applied to TARGETS - only to SWEEP_ROOTS, which by
+ *  construction the caller has picked because nothing outside the SDK's own internals ever
+ *  names them, so a root can never legitimately need one kept alive by design. */
 private fun BytecodePatchContext.sweepUnreferenced(
     sweepPrefixes: Collection<String>,
     deletedClasses: MutableSet<String>,
 ): Int {
     if (sweepPrefixes.isEmpty()) return 0
-    var totalSwept = 0
 
-    while (true) {
-        scrubSweepReferences(sweepPrefixes, deletedClasses)
+    scrubSweepReferences(sweepPrefixes, deletedClasses)
 
-        val stillReferenced = HashSet<String>()
+    val referencesOf = HashMap<String, Set<String>>()
+    val sweepCandidates = HashSet<String>()
 
-        classDefForEach { classDef ->
-            if (classDef.type in deletedClasses) return@classDefForEach
-            classDef.superclass?.let { stillReferenced += it }
-            stillReferenced += classDef.interfaces
-            classDef.fields.forEach { stillReferenced += it.type }
-            classDef.methods.forEach { method ->
-                stillReferenced += method.returnType
-                method.parameterTypes.forEach { stillReferenced += it.toString() }
-                method.implementation?.instructions?.forEach { insn ->
-                    val ref = (insn as? ReferenceInstruction)?.reference ?: return@forEach
-                    when (ref) {
-                        is MethodReference -> {
-                            stillReferenced += ref.definingClass
-                            stillReferenced += ref.returnType
-                            ref.parameterTypes.forEach { stillReferenced += it.toString() }
-                        }
-
-                        is FieldReference -> {
-                            stillReferenced += ref.definingClass
-                            stillReferenced += ref.type
-                        }
-
-                        is TypeReference -> stillReferenced += ref.type
-                    }
-                }
-                method.implementation?.tryBlocks?.forEach { tb ->
-                    tb.exceptionHandlers.forEach { it.exceptionType?.let { t -> stillReferenced += t } }
-                }
-            }
+    classDefForEach { classDef ->
+        if (classDef.type in deletedClasses) return@classDefForEach
+        referencesOf[classDef.type] = referencedTypesOf(classDef)
+        if (classDef.type.isTarget(sweepPrefixes) && classDef.type !in manifestProtectedClasses) {
+            sweepCandidates += classDef.type
         }
-
-        val orphaned = HashSet<String>()
-        classDefForEach { classDef ->
-            if (classDef.type in deletedClasses) return@classDefForEach
-            if (classDef.type.isTarget(sweepPrefixes) && classDef.type !in stillReferenced &&
-                classDef.type !in manifestProtectedClasses
-            ) {
-                orphaned += classDef.type
-            }
-        }
-
-        if (orphaned.isEmpty()) return totalSwept
-        deletedClasses += orphaned
-        totalSwept += orphaned.size
     }
+
+    val reachable = HashSet<String>()
+    val queue = ArrayDeque<String>()
+
+    referencesOf.forEach { (owner, refs) ->
+        if (owner in sweepCandidates) return@forEach   // roots seed the queue; candidates only propagate below
+        refs.forEach { ref -> if (ref in sweepCandidates && reachable.add(ref)) queue += ref }
+    }
+    while (queue.isNotEmpty()) {
+        val current = queue.removeFirst()
+        referencesOf[current]?.forEach { ref ->
+            if (ref in sweepCandidates && reachable.add(ref)) queue += ref
+        }
+    }
+
+    val orphaned = sweepCandidates - reachable
+    deletedClasses += orphaned
+    return orphaned.size
 }
 
 /**
