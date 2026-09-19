@@ -49,22 +49,37 @@ import java.util.logging.Logger
  *
  * Deliberate simplification vs. SmaliScissors: it tracks per-opcode register dataflow to
  * surgically excise a target reference from a method that also does unrelated work,
- * keeping the rest of that method intact. That is not replicated here - any instruction
- * outside the two provably-safe shapes below stubs the WHOLE containing method instead.
- * In practice this is the shape of almost every SDK-init/SDK-embedding call site anyway;
- * genuinely mixed methods (SDK call interleaved with real app logic) lose that unrelated
- * logic too when stubbed. Matching, unlike SmaliScissors' raw substring search over smali
- * text, is reference-type-exact, so a string literal that happens to contain a target
- * package name is never a false match.
- *
- * Any method with a pre-existing try/catch block (regardless of whether it references a
- * target) is also routed to the whole-method stub rather than the surgical path, and that
- * path clears the method's try blocks before wiping its instructions. Shrinking a try
- * range around one removed/replaced instruction relies on dexlib2's label tracking, and
- * wiping a method's entire body is exactly the case that tracking does not recover from
- * cleanly - it can leave a stale try_item with a collapsed startAddr=0/endAddr=0 range
- * instead of dropping it, which is a hard VerifyError ("bad exception entry") at
- * class-load time. A stubbed body has nothing left to catch anyway.
+ * keeping the rest of that method intact. That is not replicated here - matching, unlike
+ * SmaliScissors' raw substring search over smali text, is reference-type-exact, so a string
+ * literal that happens to contain a target package name is never a false match, but the two
+ * safe shapes below (a discardable invoke, a field read/write) are the only edits actually
+ * proven to preserve behavior. A method with a target reference outside those two shapes -
+ * or with a pre-existing try/catch at all (shrinking a try range around a removed/replaced
+ * instruction relies on dexlib2's label tracking, which does not recover cleanly from a
+ * fully wiped body - it can leave a stale try_item with a collapsed
+ * startAddr=0/endAddr=0 range instead of dropping it, a hard VerifyError at class-load
+ * time) - used to fall back to replacing the WHOLE method body with a trivial stub. That
+ * caused two confirmed startup crashes on MX Player: an R8-merged lambda dispatcher
+ * (packed-switch fanning out to a dozen unrelated call sites) had every case wiped because
+ * ONE of them referenced an ad SDK type, and a lifecycle override that called super() before
+ * a few hundred lines of ad-SDK init had that super() call deleted along with the ad code,
+ * skipping base-class setup the rest of the app depended on. There is no way to tell
+ * "essential" from "ad code" at the instruction level without the full register-dataflow
+ * tracking this file deliberately doesn't replicate, so instead of guessing, an
+ * unsurgical method is now handled only via strategies that are structurally provable safe
+ * regardless of content: a switch-bearing method is left completely alone (see the switch
+ * check in runRound - this is what fixes the lambda-dispatcher case); a static initializer
+ * is deleted outright (never inherited, so this is equivalent to it having run and done
+ * nothing); a constructor is reduced to just its super call plus return (every constructor
+ * must structurally do that much anyway, so this isn't a guess about content the way an
+ * arbitrary stub would be); any other method is deleted only if the superclass already
+ * defines the identical signature, so the vtable falls through to that implementation
+ * naturally (this is what fixes the lifecycle-override case - App.t()/A() calling super()
+ * is exactly this shape) - and failing all of those, the method is left completely
+ * untouched rather than stubbed. A method left this way may still hold a live reference to
+ * a class that gets deleted elsewhere; that is a real residual risk, but a conditional one
+ * (it only matters if that specific reference is ever reached at runtime), unlike a blanket
+ * stub which unconditionally destroys whatever else the method did on every single call.
  *
  * A class can also be a live entry point with zero bytecode references anywhere - the
  * classic case is an SDK's auto-init ContentProvider (e.g. Google Mobile Ads'
@@ -72,8 +87,9 @@ import java.util.logging.Logger
  * reflection at process start, which no dex-reference scan can ever see. Both TARGETS and
  * SWEEP_ROOTS deletion defer to [manifestProtectedClasses] (see ManifestProtectedClasses.kt)
  * before ever adding a class to the deleted set - same role SmaliScissors' SmaliKeeper
- * plays. A protected class still gets its own SDK-referencing methods cleaned/stubbed like
- * any other surviving class; only the class itself is exempt from deletion.
+ * plays. A protected class still gets its own SDK-referencing methods processed like any
+ * other surviving class (surgically cleaned where safe, left alone otherwise); only the
+ * class itself is exempt from deletion.
  */
 
 private fun String.isTarget(prefixes: Collection<String>) = prefixes.any { startsWith(it) }
@@ -88,17 +104,6 @@ private fun Instruction.referencesTarget(prefixes: Collection<String>): Boolean 
         is TypeReference -> ref.type.isTarget(prefixes)
         else -> false
     }
-}
-
-/** One instruction per list element so the call site can insert them before removing the
- *  method's old body (see the stub-body block in runRound for why that order matters -
- *  it's not about single- vs multi-line smali, InlineSmaliCompiler handles multi-line
- *  fine per Morphe's own docs). */
-private fun minimalReturnFor(returnType: String): List<String> = when (returnType) {
-    "V" -> listOf("return-void")
-    "Z", "B", "C", "S", "I", "F" -> listOf("const/4 v0, 0x0", "return v0")
-    "J", "D" -> listOf("const-wide/16 v0, 0x0", "return-wide v0")
-    else -> listOf("const/4 v0, 0x0", "return-object v0")
 }
 
 /** const/16, not const/4: SGET/IGET's own register field is 8-bit (v0-255), but const/4's
@@ -150,7 +155,8 @@ private fun BytecodePatchContext.forceFullBytecodeMode() {
 
 private class RoundResult {
     var deletedMethods = 0
-    var stubbedMethods = 0
+    var reducedConstructors = 0
+    var leftUntouched = 0
     var failedMethods = 0
     val orphanedClasses = HashSet<String>()
 }
@@ -233,7 +239,15 @@ private fun BytecodePatchContext.runRound(
                     when {
                         opName.startsWith("INVOKE_") -> {
                             val ref = (insn as ReferenceInstruction).reference as MethodReference
-                            if (ref.returnType == "V" && ref.name != "<init>") {
+                            // Safe to drop outright if there's nothing to preserve: a void
+                            // call, or a non-void call whose result the very next
+                            // instruction doesn't consume via move-result (including when
+                            // this is the method's last instruction) - the return value was
+                            // going to be thrown away either way, so removing the call
+                            // changes nothing observable.
+                            val resultDiscarded = ref.returnType == "V" ||
+                                    insns.getOrNull(index + 1)?.opcode?.name?.startsWith("MOVE_RESULT") != true
+                            if (ref.name != "<init>" && resultDiscarded) {
                                 surgicalEdits += index to null
                             } else {
                                 allSurgical = false
@@ -260,55 +274,109 @@ private fun BytecodePatchContext.runRound(
                     if (smali == null) mutableMethod.removeInstruction(index)
                     else mutableMethod.replaceInstruction(index, smali)
                 }
-            } else {
-                clearTryBlocks(impl)
-                val originalCount = mutableMethod.instructions.size
-                val stubBody = when (mutableMethod.name) {
-                    "<init>" -> {
-                        // "p0" in the regular invoke-direct format resolves to an absolute
-                        // register number - registerCount minus this-and-param width - which
-                        // for a method with many locals (large registerCount) lands well
-                        // above v15, the ceiling the 4-bit register-argument format allows.
-                        // registerCount is fixed (dexlib2 MutableMethodImplementation has no
-                        // setter for it), so compute the real number ourselves and fall back
-                        // to invoke-direct/range - which addresses any register - once it's
-                        // out of range instead of relying on "p0" to resolve safely.
-                        val paramWidth = mutableMethod.parameterTypes.sumOf {
-                            if (it.toString() == "J" || it.toString() == "D") 2 else 1
-                        }
-                        val thisReg = impl.registerCount - paramWidth - 1
-                        val superCall = if (thisReg <= 15) {
-                            "invoke-direct {v$thisReg}, $effectiveSuper-><init>()V"
-                        } else {
-                            "invoke-direct/range {v$thisReg .. v$thisReg}, $effectiveSuper-><init>()V"
-                        }
-                        listOf(superCall, "return-void")
-                    }
-                    "<clinit>" -> listOf("return-void")
-                    else -> minimalReturnFor(mutableMethod.returnType)
+                continue
+            }
+
+            // Not surgically safe. A blanket whole-method stub used to sit here - it's what
+            // caused two confirmed startup crashes on MX Player: com.mxtech.videoplayer.ad
+            // .App.t()/.A() are overrides that call super() before ~500 lines of ad-SDK
+            // init, and stubbing them to a bare return-void deleted that super() call along
+            // with the ad code, skipping essential base-class setup the rest of the app
+            // depends on. There is no way to tell "this instruction is essential" from
+            // "this instruction is ad code" at this level without full register-dataflow
+            // tracking (the real SmaliScissors approach, not replicated here - see the file
+            // header). So instead of guessing, handle only the cases where removing the
+            // WHOLE method is structurally provable to be safe, and leave everything else
+            // completely alone.
+            when (mutableMethod.name) {
+                "<clinit>" -> {
+                    // A static initializer is never inherited or overridden - deleting it
+                    // outright is equivalent to it having run and done nothing, not a
+                    // fallthrough to anything else. If its only job was setting up
+                    // ad-related statics, that's exactly the outcome removal wants anyway.
+                    mutableClass.methods.remove(mutableMethod)
+                    result.deletedMethods++
+                    logger.fine("delete <clinit> (not surgically safe): ${classDef.type}")
                 }
-                try {
-                    // Insert before removing: compiling against a method already wiped to
-                    // zero instructions is what actually broke here, not multi-instruction
-                    // content - this exact invoke-direct snippet already works fine via
-                    // replaceInstruction elsewhere in this file, on a method that still has
-                    // its original body.
-                    stubBody.forEachIndexed { offset, line -> mutableMethod.addInstructions(offset, line) }
-                    mutableMethod.removeInstructions(stubBody.size, originalCount)
-                    result.stubbedMethods++
-                    logger.fine(
-                        "stub method (${if (impl.tryBlocks.isEmpty()) "unsafe instruction" else "has try/catch"}): " +
-                                "${classDef.type}->${mutableMethod.name}"
-                    )
-                } catch (e: Exception) {
-                    result.failedMethods++
-                    logger.severe(
-                        "FAILED to stub ${classDef.type}->${mutableMethod.name}" +
-                                "(${mutableMethod.parameterTypes.joinToString(",")})${mutableMethod.returnType} " +
-                                "- method left as-is, may still reference a deleted class: " +
-                                "stubBody=$stubBody effectiveSuper=$effectiveSuper originalCount=$originalCount " +
-                                "registerCount=${impl.registerCount} - ${e.javaClass.name}: ${e.message}"
-                    )
+
+                "<init>" -> {
+                    // Every constructor must structurally call some super constructor -
+                    // reducing it to just that call plus return is a narrow, well-defined
+                    // simplification, not a guess: unlike an arbitrary method there is no
+                    // ambiguity about what a constructor's minimum valid body looks like.
+                    // This is deliberately kept distinct from the removed general stub,
+                    // which invented a fake return value for a method that could have been
+                    // doing anything.
+                    clearTryBlocks(impl)
+                    val originalCount = mutableMethod.instructions.size
+                    val paramWidth = mutableMethod.parameterTypes.sumOf {
+                        if (it.toString() == "J" || it.toString() == "D") 2 else 1
+                    }
+                    val thisReg = impl.registerCount - paramWidth - 1
+                    val superCall = if (thisReg <= 15) {
+                        "invoke-direct {v$thisReg}, $effectiveSuper-><init>()V"
+                    } else {
+                        "invoke-direct/range {v$thisReg .. v$thisReg}, $effectiveSuper-><init>()V"
+                    }
+                    try {
+                        listOf(superCall, "return-void").forEachIndexed { offset, line ->
+                            mutableMethod.addInstructions(offset, line)
+                        }
+                        mutableMethod.removeInstructions(2, originalCount)
+                        result.reducedConstructors++
+                    } catch (e: Exception) {
+                        result.failedMethods++
+                        logger.severe(
+                            "FAILED to reduce constructor ${classDef.type}-><init>: attempted " +
+                                    "super call=$superCall registerCount=${impl.registerCount} - " +
+                                    "${e.javaClass.name}: ${e.message}"
+                        )
+                    }
+                }
+
+                else -> {
+                    // Deleting the override is only safe if (a) the superclass already
+                    // defines this exact signature, so the vtable falls through to that
+                    // implementation naturally, AND (b) the override already calls that
+                    // super method itself somewhere - proving it was structured as
+                    // "delegate to base behavior plus extra work", not a full replacement
+                    // of it. Without (b), an override that never calls super could be
+                    // providing entirely different, load-bearing behavior; deleting it
+                    // would silently swap in whatever the base class does instead, which
+                    // is a bigger behavioral change than removing ad code. If nothing up
+                    // the chain provides (a) at all - a genuinely new method, or one
+                    // satisfying an interface contract, where deleting produces an
+                    // AbstractMethodError or a verification failure, not a safe fallthrough
+                    // - or (b) doesn't hold, leave the method exactly as it was.
+                    val superType = classDef.superclass
+                    val superHasSameMethod = superType?.let {
+                        classDefByOrNull(it)?.methods?.any { sm ->
+                            sm.name == mutableMethod.name &&
+                                    sm.returnType == mutableMethod.returnType &&
+                                    sm.parameterTypes.map { p -> p.toString() } ==
+                                    mutableMethod.parameterTypes.map { p -> p.toString() }
+                        }
+                    } == true
+                    val callsSuper = superType != null && insns.any { insn ->
+                        val ref = (insn as? ReferenceInstruction)?.reference as? MethodReference
+                        insn.opcode.name.startsWith("INVOKE_SUPER") &&
+                                ref?.name == mutableMethod.name && ref.definingClass == superType
+                    }
+
+                    if (superHasSameMethod && callsSuper) {
+                        mutableClass.methods.remove(mutableMethod)
+                        result.deletedMethods++
+                        logger.fine(
+                            "delete override, superclass provides fallback: " +
+                                    "${classDef.type}->${mutableMethod.name}"
+                        )
+                    } else {
+                        result.leftUntouched++
+                        logger.fine(
+                            "leave untouched, no safe removal strategy: " +
+                                    "${classDef.type}->${mutableMethod.name}"
+                        )
+                    }
                 }
             }
         }
@@ -421,7 +489,9 @@ private fun BytecodePatchContext.scrubSweepReferences(
                 when {
                     opName.startsWith("INVOKE_") -> {
                         val ref = (insn as ReferenceInstruction).reference as MethodReference
-                        if (ref.returnType == "V" && ref.name != "<init>") edits += index to null
+                        val resultDiscarded = ref.returnType == "V" ||
+                                insns.getOrNull(index + 1)?.opcode?.name?.startsWith("MOVE_RESULT") != true
+                        if (ref.name != "<init>" && resultDiscarded) edits += index to null
                     }
 
                     opName.startsWith("SGET") || opName.startsWith("IGET") -> {
@@ -559,7 +629,8 @@ fun BytecodePatchContext.removeCodeByPrefix(
     val deletedClasses = HashSet<String>()
     val currentPrefixes = prefixes.toMutableSet()
     var deletedMethods = 0
-    var stubbedMethods = 0
+    var reducedConstructors = 0
+    var leftUntouched = 0
     var failedMethods = 0
     var round = 0
 
@@ -578,7 +649,8 @@ fun BytecodePatchContext.removeCodeByPrefix(
 
         val result = runRound(currentPrefixes, deletedClasses, logger)
         deletedMethods += result.deletedMethods
-        stubbedMethods += result.stubbedMethods
+        reducedConstructors += result.reducedConstructors
+        leftUntouched += result.leftUntouched
         failedMethods += result.failedMethods
 
         val newlyOrphaned = result.orphanedClasses.filterNot { it in deletedClasses }
@@ -596,8 +668,11 @@ fun BytecodePatchContext.removeCodeByPrefix(
     deletedClasses.forEach { if (classMap.remove(it) != null) removed++ }
     logger.info(
         "\"$tag\": removed $removed classes ($swept via reachability sweep) over $round round(s), " +
-                "deleted $deletedMethods methods (signature match), stubbed $stubbedMethods methods, " +
-                "$failedMethods method(s) FAILED to stub (see Level.SEVERE above if >0) " +
-                "(set Level.FINE on logger \"RemoveCode:$tag\" for the per-method list)"
+                "deleted $deletedMethods methods (signature/clinit/override-fallback), " +
+                "reduced $reducedConstructors constructors to super-call-only, " +
+                "left $leftUntouched methods completely untouched (no safe removal strategy - " +
+                "may retain a reference to a deleted class), $failedMethods constructor(s) FAILED to " +
+                "reduce (see Level.SEVERE above if >0) (set Level.FINE on logger \"RemoveCode:$tag\" " +
+                "for the per-method list)"
     )
 }
