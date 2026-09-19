@@ -211,6 +211,16 @@ private fun BytecodePatchContext.runRound(
             val impl = mutableMethod.implementation ?: continue
             val insns = impl.instructions.toList()
 
+            // A packed-switch/sparse-switch is R8's fingerprint for a merged lambda
+            // dispatcher: one method fanning out to N unrelated call sites bundled
+            // together purely because they compiled to identical bytecode shape. Confirmed
+            // against a real crash: stubbing such a method (even just the one case that
+            // happened to reference a target) silently destroyed every other case's
+            // unrelated functionality along with it. Leave the whole method exactly as-is -
+            // whatever target reference lives inside one case stays, same residual risk as
+            // any other reference this pass doesn't reach, but every unrelated case survives.
+            if (insns.any { it.opcode.name.contains("SWITCH") }) continue
+
             // ANY pre-existing try/catch - target-related or not - disqualifies the
             // surgical path entirely; see the file header for why.
             var allSurgical = impl.tryBlocks.isEmpty()
@@ -401,9 +411,11 @@ private fun BytecodePatchContext.scrubSweepReferences(
             } ?: continue
             val impl = mutableMethod.implementation ?: continue
             if (impl.tryBlocks.isNotEmpty()) continue
+            val insns = impl.instructions.toList()
+            if (insns.any { it.opcode.name.contains("SWITCH") }) continue
 
             val edits = ArrayList<Pair<Int, String?>>()
-            for ((index, insn) in impl.instructions.toList().withIndex()) {
+            for ((index, insn) in insns.withIndex()) {
                 if (!insn.referencesTarget(sweepPrefixes)) continue
                 val opName = insn.opcode.name
                 when {
