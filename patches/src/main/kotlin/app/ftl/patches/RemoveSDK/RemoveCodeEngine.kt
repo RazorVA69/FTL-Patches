@@ -394,6 +394,33 @@ private fun BytecodePatchContext.runRound(
                     }
 
                     // TEMPORARY diagnostic (remove once the App.A()/CleverTapAPI mystery is
+                    // resolved): for a known false-negative case (superHasSameMethod=true,
+                    // callsSuper=false, yet the real smali plainly contains a matching
+                    // invoke-super), dump every instruction that even LOOKS like an
+                    // invoke-super, with dexlib2's raw values, next to what this comparison
+                    // expected - so a mismatch (opcode name, ref.name, ref.definingClass) is
+                    // visible directly instead of inferred from a single aggregate boolean.
+                    if (superType != null && superHasSameMethod && !callsSuper) {
+                        val candidates = insns.filter { it.opcode.name.contains("SUPER") }
+                        if (candidates.isEmpty()) {
+                            logger.info(
+                                "no SUPER-opcode instructions found at all in " +
+                                        "${classDef.type}->${mutableMethod.name} (insns.size=${insns.size})"
+                            )
+                        } else {
+                            candidates.forEach { insn ->
+                                val ref = (insn as? ReferenceInstruction)?.reference as? MethodReference
+                                logger.info(
+                                    "SUPER-opcode candidate in ${classDef.type}->${mutableMethod.name}: " +
+                                            "opcode=${insn.opcode.name} refName=${ref?.name} " +
+                                            "refDefiningClass=${ref?.definingClass} refReturnType=${ref?.returnType} " +
+                                            "-- expected name=${mutableMethod.name} expected definingClass=$superType"
+                                )
+                            }
+                        }
+                    }
+
+                    // TEMPORARY diagnostic (remove once the App.A()/CleverTapAPI mystery is
                     // resolved): scoped to only methods where at least one of the two
                     // signals is already true, so this doesn't flood the log with every
                     // interface-implementation method that has no super-relationship at all.
