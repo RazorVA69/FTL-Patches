@@ -13,25 +13,14 @@ import com.android.tools.smali.dexlib2.iface.ClassDef
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import java.util.logging.Logger
-
-/*
- * Port of SmaliScissors' [REMOVE_CODE] engine onto dexlib2/Morphe.
- * 
- * CRASH FIXES APPLIED:
- * 1. Hard-skip for Kotlin Functions/Lambdas to prevent gutting shared dispatchers.
- * 2. Safe override fallback: Do not delete override methods just because they call super.
- * 3. Enhanced surgical path: Zero out destination registers for non-void invokes.
- * 4. Superclass Chain Resolution: Walk up the inheritance chain to find the nearest surviving
- *    superclass when the direct superclass is deleted.
- * 5. Aggressive Stubbing for Manifest-Protected SDK Classes: If an SDK class is kept solely
- *    because the OS requires it, aggressively stub ALL its methods to return default values.
- * 6. VERIFY ERROR FIX: Constructors (<init>) in protected classes must call super.<init>() 
- *    before returning, otherwise the Dalvik verifier rejects the class.
- */
 
 private fun String.isTarget(prefixes: Collection<String>) = prefixes.any { startsWith(it) }
 
@@ -102,9 +91,7 @@ private fun BytecodePatchContext.runRound(
 
         val isKotlinLambda = classDef.superclass == "Lkotlin/jvm/internal/Lambda;" ||
                 classDef.interfaces.any { it.startsWith("Lkotlin/jvm/functions/Function") }
-        if (isKotlinLambda) {
-            return@classLoop
-        }
+        if (isKotlinLambda) return@classLoop
 
         val superIsTarget = classDef.superclass?.isTarget(prefixes) == true || classDef.superclass in deletedClasses
         val targetInterfaces = classDef.interfaces.filter { it.isTarget(prefixes) || it in deletedClasses }
@@ -115,9 +102,9 @@ private fun BytecodePatchContext.runRound(
                     method.implementation?.let { impl ->
                         impl.instructions.any { it.referencesTarget(prefixes) } ||
                                 impl.tryBlocks.any { tb ->
-                                    tb.exceptionHandlers.any { 
+                                    tb.exceptionHandlers.any {
                                         val t = it.exceptionType?.toString() ?: ""
-                                        t.isTarget(prefixes) || t in deletedClasses 
+                                        t.isTarget(prefixes) || t in deletedClasses
                                     }
                                 }
                     } == true
@@ -128,7 +115,7 @@ private fun BytecodePatchContext.runRound(
         }
 
         val mutableClass = mutableClassDefBy(classDef.type)
-        
+
         var effectiveSuper = classDef.superclass ?: "Ljava/lang/Object;"
         if (superIsTarget) {
             var currentSuper = classDef.superclass
@@ -144,68 +131,103 @@ private fun BytecodePatchContext.runRound(
 
         val isProtectedTarget = classDef.type in manifestProtectedClasses && classDef.type.isTarget(prefixes)
         if (isProtectedTarget) {
-            for (method in mutableClass.methods) {
-                val impl = method.implementation ?: continue
-                if (impl.instructions.isEmpty()) continue
-                
+            val constructors = mutableClass.methods.toList().filter { it.name == "<init>" }
+            val hasNoArgConstructor = constructors.any { it.parameterTypes.isEmpty() }
+
+            for (ctor in constructors) {
+                val ctorParamWidth = ctor.parameterTypes.sumOf {
+                    if (it.toString() == "J" || it.toString() == "D") 2 else 1
+                }
+                val ctorSigIsTarget = ctor.parameterTypes.any {
+                    it.toString().isTarget(prefixes) || it.toString() in deletedClasses
+                }
+
+                if (ctorSigIsTarget && ctorParamWidth > 0 && hasNoArgConstructor) {
+                    mutableClass.methods.remove(ctor)
+                    result.deletedMethods++
+                    continue
+                }
+
+                val impl = ctor.implementation ?: continue
                 clearTryBlocks(impl)
                 val originalCount = impl.instructions.size
-                val returnType = method.returnType
-                val stubInstructions = mutableListOf<String>()
-                
-                // FIX: Constructors MUST call super() before returning.
-                if (method.name == "<init>") {
-                    val paramWidth = method.parameterTypes.sumOf {
-                        if (it.toString() == "J" || it.toString() == "D") 2 else 1
-                    }
-                    val thisReg = impl.registerCount - paramWidth - 1
-                    val superCall = if (thisReg <= 15) {
-                        "invoke-direct {v$thisReg}, $effectiveSuper-><init>()V"
-                    } else {
-                        "invoke-direct/range {v$thisReg .. v$thisReg}, $effectiveSuper-><init>()V"
-                    }
-                    stubInstructions.add(superCall)
-                    stubInstructions.add("return-void")
+                val requiredRegs = ctorParamWidth + 1
+                if (impl.registerCount < requiredRegs) impl.registerCount = requiredRegs
+
+                val thisReg = impl.registerCount - ctorParamWidth - 1
+                val superCall = if (thisReg <= 15) {
+                    "invoke-direct {v$thisReg}, $effectiveSuper-><init>()V"
                 } else {
-                    when (returnType) {
-                        "V" -> stubInstructions.add("return-void")
-                        "Z", "B", "S", "C", "I" -> {
-                            stubInstructions.add("const/4 v0, 0x0")
-                            stubInstructions.add("return v0")
-                        }
-                        "J" -> {
-                            stubInstructions.add("const-wide/16 v0, 0x0")
-                            stubInstructions.add("return-wide v0")
-                        }
-                        "F" -> {
-                            stubInstructions.add("const/4 v0, 0x0")
-                            stubInstructions.add("return v0")
-                        }
-                        "D" -> {
-                            stubInstructions.add("const-wide/16 v0, 0x0")
-                            stubInstructions.add("return-wide v0")
-                        }
-                        else -> {
-                            stubInstructions.add("const/4 v0, 0x0")
-                            stubInstructions.add("return-object v0")
-                        }
-                    }
+                    "invoke-direct/range {v$thisReg .. v$thisReg}, $effectiveSuper-><init>()V"
                 }
-                
+
                 try {
-                    stubInstructions.forEachIndexed { offset, line ->
-                        method.addInstructions(offset, line)
-                    }
-                    method.removeInstructions(stubInstructions.size, originalCount)
+                    ctor.addInstructions(0, superCall)
+                    ctor.addInstructions(1, "return-void")
+                    if (originalCount > 0) ctor.removeInstructions(2, originalCount)
+                    result.reducedConstructors++
+                } catch (e: Exception) {
+                    result.failedMethods++
+                    logger.severe("FAILED to reduce protected constructor ${classDef.type}-><init>: ${e.message}")
+                }
+            }
+
+            for (method in methodsNeedingWork) {
+                if (method.name == "<init>") continue
+                val mutableMethod = mutableClass.methods.firstOrNull { m ->
+                    m.name == method.name && m.returnType == method.returnType &&
+                            m.parameterTypes.map { it.toString() } == method.parameterTypes.map { it.toString() }
+                } ?: continue
+
+                if (mutableMethod.name == "<clinit>") {
+                    mutableClass.methods.remove(mutableMethod)
+                    result.deletedMethods++
+                    continue
+                }
+
+                val sigIsTarget = mutableMethod.returnType.isTarget(prefixes) ||
+                        mutableMethod.returnType in deletedClasses ||
+                        mutableMethod.parameterTypes.any { it.toString().isTarget(prefixes) || it.toString() in deletedClasses }
+
+                if (sigIsTarget) {
+                    mutableClass.methods.remove(mutableMethod)
+                    result.deletedMethods++
+                    continue
+                }
+
+                val impl = mutableMethod.implementation ?: continue
+                clearTryBlocks(impl)
+                val originalCount = impl.instructions.size
+                val mParamWidth = mutableMethod.parameterTypes.sumOf {
+                    if (it.toString() == "J" || it.toString() == "D") 2 else 1
+                }
+                val isStatic = (mutableMethod.accessFlags and 0x8) != 0
+                val returnType = mutableMethod.returnType
+                val requiredRegs = mParamWidth + (if (!isStatic) 1 else 0) +
+                        when (returnType) { "V" -> 0; "J", "D" -> 2; else -> 1 }
+
+                if (impl.registerCount < requiredRegs) impl.registerCount = requiredRegs
+
+                val stubInstructions = when (returnType) {
+                    "V" -> listOf("return-void")
+                    "Z", "B", "S", "C", "I", "F" -> listOf("const/4 v0, 0x0", "return v0")
+                    "J", "D" -> listOf("const-wide/16 v0, 0x0", "return-wide v0")
+                    else -> listOf("const/4 v0, 0x0", "return-object v0")
+                }
+
+                try {
+                    stubInstructions.forEachIndexed { offset, line -> mutableMethod.addInstructions(offset, line) }
+                    if (originalCount > 0) mutableMethod.removeInstructions(stubInstructions.size, originalCount)
                     result.stubbedMethods++
                 } catch (e: Exception) {
-                    logger.severe("FAILED to stub protected method ${classDef.type}->${method.name}: ${e.message}")
                     result.failedMethods++
+                    logger.severe("FAILED to stub protected method ${classDef.type}->${mutableMethod.name}: ${e.message}")
                 }
             }
-            if (hasTargetField) {
-                mutableClass.fields.removeAll { it.type.isTarget(prefixes) || it.type in deletedClasses }
-            }
+
+            if (hasTargetField) mutableClass.fields.removeAll { it.type.isTarget(prefixes) || it.type in deletedClasses }
+            val emptyClinit = mutableClass.methods.firstOrNull { m -> m.name == "<clinit>" && m.implementation?.instructions?.toList()?.let { it.size == 1 && it[0].opcode == Opcode.RETURN_VOID } == true }
+            if (emptyClinit != null) mutableClass.methods.remove(emptyClinit)
             return@classLoop
         }
 
@@ -220,7 +242,6 @@ private fun BytecodePatchContext.runRound(
             if (sigIsTarget) {
                 mutableClass.methods.remove(mutableMethod)
                 result.deletedMethods++
-                logger.fine("delete method (signature): ${classDef.type}->${method.name}")
                 continue
             }
 
@@ -229,52 +250,58 @@ private fun BytecodePatchContext.runRound(
 
             if (insns.any { it.opcode.name.contains("SWITCH") }) continue
 
-            var allSurgical = impl.tryBlocks.isEmpty()
+            var allSurgical = true
+            val hadTryBlocks = impl.tryBlocks.isNotEmpty()
             val surgicalEdits = ArrayList<Pair<Int, String?>>()
-            if (allSurgical) {
-                for ((index, insn) in insns.withIndex()) {
-                    if (!allSurgical) break
-                    if (!insn.referencesTarget(prefixes)) continue
-                    val opName = insn.opcode.name
-                    when {
-                        opName.startsWith("INVOKE_") -> {
-                            val ref = (insn as ReferenceInstruction).reference as MethodReference
-                            val nextInsn = insns.getOrNull(index + 1)
-                            val isMoveResult = nextInsn?.opcode?.name?.startsWith("MOVE_RESULT") == true
-                            
-                            if (ref.name != "<init>") {
-                                if (ref.returnType == "V" || !isMoveResult) {
-                                    surgicalEdits += index to null
-                                } else {
-                                    val destReg = (nextInsn as OneRegisterInstruction).registerA
-                                    val zeroLoad = zeroLoadFor(destReg, ref.returnType)
-                                    surgicalEdits += index to zeroLoad
-                                    surgicalEdits += (index + 1) to null
-                                }
+            
+            for ((index, insn) in insns.withIndex()) {
+                if (!insn.referencesTarget(prefixes)) continue
+                val opName = insn.opcode.name
+                when {
+                    opName.startsWith("INVOKE_") -> {
+                        val ref = (insn as ReferenceInstruction).reference as MethodReference
+                        val nextInsn = insns.getOrNull(index + 1)
+                        val isMoveResult = nextInsn?.opcode?.name?.startsWith("MOVE_RESULT") == true
+                        if (ref.name != "<init>") {
+                            if (ref.returnType == "V" || !isMoveResult) {
+                                surgicalEdits += index to "nop"
                             } else {
-                                allSurgical = false
+                                val destReg = (nextInsn as OneRegisterInstruction).registerA
+                                val zeroLoad = zeroLoadFor(destReg, ref.returnType)
+                                surgicalEdits += index to zeroLoad
+                                surgicalEdits += (index + 1) to "nop"
                             }
+                        } else {
+                            allSurgical = false
                         }
-
-                        opName.startsWith("SGET") || opName.startsWith("IGET") -> {
-                            val fieldType = ((insn as ReferenceInstruction).reference as FieldReference).type
-                            val reg = (insn as OneRegisterInstruction).registerA
-                            surgicalEdits += index to zeroLoadFor(reg, fieldType)
-                        }
-
-                        opName.startsWith("SPUT") || opName.startsWith("IPUT") -> {
-                            surgicalEdits += index to null
-                        }
-
-                        else -> allSurgical = false
                     }
+                    opName.startsWith("SGET") || opName.startsWith("IGET") -> {
+                        val fieldType = ((insn as ReferenceInstruction).reference as FieldReference).type
+                        val reg = (insn as OneRegisterInstruction).registerA
+                        surgicalEdits += index to zeroLoadFor(reg, fieldType)
+                    }
+                    opName.startsWith("SPUT") || opName.startsWith("IPUT") -> {
+                        surgicalEdits += index to "nop"
+                    }
+                    opName == "NEW_INSTANCE" || opName == "CONST_CLASS" -> {
+                        val reg = (insn as OneRegisterInstruction).registerA
+                        surgicalEdits += index to zeroLoadFor(reg, "L")
+                    }
+                    opName == "CHECK_CAST" -> {
+                        surgicalEdits += index to "nop"
+                    }
+                    opName == "INSTANCE_OF" -> {
+                        val destReg = (insn as TwoRegisterInstruction).registerA
+                        surgicalEdits += index to zeroLoadFor(destReg, "Z")
+                    }
+                    else -> allSurgical = false
                 }
             }
 
             if (allSurgical && surgicalEdits.isNotEmpty()) {
+                if (hadTryBlocks) clearTryBlocks(impl)
                 surgicalEdits.sortedByDescending { it.first }.forEach { (index, smali) ->
-                    if (smali == null) mutableMethod.removeInstruction(index)
-                    else mutableMethod.replaceInstruction(index, smali)
+                    mutableMethod.replaceInstruction(index, smali!!)
                 }
                 continue
             }
@@ -283,9 +310,7 @@ private fun BytecodePatchContext.runRound(
                 "<clinit>" -> {
                     mutableClass.methods.remove(mutableMethod)
                     result.deletedMethods++
-                    logger.fine("delete <clinit> (not surgically safe): ${classDef.type}")
                 }
-
                 "<init>" -> {
                     clearTryBlocks(impl)
                     val originalCount = mutableMethod.instructions.size
@@ -299,27 +324,90 @@ private fun BytecodePatchContext.runRound(
                         "invoke-direct/range {v$thisReg .. v$thisReg}, $effectiveSuper-><init>()V"
                     }
                     try {
-                        listOf(superCall, "return-void").forEachIndexed { offset, line ->
-                            mutableMethod.addInstructions(offset, line)
-                        }
+                        listOf(superCall, "return-void").forEachIndexed { offset, line -> mutableMethod.addInstructions(offset, line) }
                         mutableMethod.removeInstructions(2, originalCount)
                         result.reducedConstructors++
                     } catch (e: Exception) {
                         result.failedMethods++
-                        logger.severe(
-                            "FAILED to reduce constructor ${classDef.type}-><init>: attempted " +
-                                    "super call=$superCall registerCount=${impl.registerCount} - " +
-                                    "${e.javaClass.name}: ${e.message}"
-                        )
+                        logger.severe("FAILED to reduce constructor ${classDef.type}-><init>: ${e.message}")
                     }
                 }
-
                 else -> {
+                    val superType = classDef.superclass
+                    val superHasSameMethod = superType?.let {
+                        classDefByOrNull(it)?.methods?.any { sm ->
+                            sm.name == mutableMethod.name && sm.returnType == mutableMethod.returnType &&
+                                    sm.parameterTypes.map { p -> p.toString() } == mutableMethod.parameterTypes.map { p -> p.toString() }
+                        }
+                    } == true
+
+                    val superCallInsn = insns.firstOrNull { insn ->
+                        val ref = (insn as? ReferenceInstruction)?.reference as? MethodReference
+                        insn.opcode.name.startsWith("INVOKE_SUPER") &&
+                                ref?.name == mutableMethod.name && ref.definingClass == superType
+                    }
+
+                    if (mutableMethod.returnType == "V" && superHasSameMethod && superCallInsn != null) {
+                        val paramWidth = mutableMethod.parameterTypes.sumOf {
+                            if (it.toString() == "J" || it.toString() == "D") 2 else 1
+                        }
+                        val isStatic = (mutableMethod.accessFlags and 0x8) != 0
+                        val firstParamReg = impl.registerCount - paramWidth - (if (!isStatic) 1 else 0)
+
+                        var usesOnlyParams = false
+                        if (superCallInsn is RegisterRangeInstruction) {
+                            val startReg = superCallInsn.startRegister
+                            val count = superCallInsn.registerCount
+                            usesOnlyParams = (startReg >= firstParamReg) && (startReg + count <= impl.registerCount)
+                        } else if (superCallInsn is FiveRegisterInstruction) {
+                            val regs = listOf(superCallInsn.registerC, superCallInsn.registerD, superCallInsn.registerE, superCallInsn.registerF, superCallInsn.registerG)
+                            val count = (superCallInsn as RegisterRangeInstruction).registerCount
+                            usesOnlyParams = regs.take(count).all { it >= firstParamReg }
+                        } else if (superCallInsn is ThreeRegisterInstruction) {
+                            usesOnlyParams = listOf(superCallInsn.registerA, superCallInsn.registerB, superCallInsn.registerC).all { it >= firstParamReg }
+                        } else if (superCallInsn is TwoRegisterInstruction) {
+                            usesOnlyParams = listOf(superCallInsn.registerA, superCallInsn.registerB).all { it >= firstParamReg }
+                        } else if (superCallInsn is OneRegisterInstruction) {
+                            usesOnlyParams = superCallInsn.registerA >= firstParamReg
+                        }
+
+                        if (usesOnlyParams) {
+                            clearTryBlocks(impl)
+                            val originalCount = impl.instructions.size
+                            val ref = (superCallInsn as ReferenceInstruction).reference as MethodReference
+                            val paramsStr = ref.parameterTypes.joinToString("") { it.toString() }
+
+                            val superCallSmali = if (superCallInsn is RegisterRangeInstruction) {
+                                val startReg = superCallInsn.startRegister
+                                val endReg = startReg + superCallInsn.registerCount - 1
+                                "invoke-super/range {v$startReg .. v$endReg}, $superType->${ref.name}($paramsStr)${ref.returnType}"
+                            } else {
+                                val regs = mutableListOf<Int>()
+                                when (superCallInsn) {
+                                    is FiveRegisterInstruction -> regs.addAll(listOf(superCallInsn.registerC, superCallInsn.registerD, superCallInsn.registerE, superCallInsn.registerF, superCallInsn.registerG))
+                                    is ThreeRegisterInstruction -> regs.addAll(listOf(superCallInsn.registerA, superCallInsn.registerB, superCallInsn.registerC))
+                                    is TwoRegisterInstruction -> regs.addAll(listOf(superCallInsn.registerA, superCallInsn.registerB))
+                                    is OneRegisterInstruction -> regs.add(superCallInsn.registerA)
+                                }
+                                val count = (superCallInsn as RegisterRangeInstruction).registerCount
+                                val regsStr = regs.take(count).joinToString(", ") { "v$it" }
+                                "invoke-super {$regsStr}, $superType->${ref.name}($paramsStr)${ref.returnType}"
+                            }
+
+                            try {
+                                mutableMethod.removeInstructions(0, originalCount)
+                                mutableMethod.addInstructions(0, listOf(superCallSmali, "return-void"))
+                                result.reducedConstructors++
+                                logger.fine("stubbed void override to super call only: ${classDef.type}->${mutableMethod.name}")
+                            } catch (e: Exception) {
+                                result.failedMethods++
+                                logger.severe("FAILED to stub override ${classDef.type}->${mutableMethod.name}: ${e.message}")
+                            }
+                            continue
+                        }
+                    }
+
                     result.leftUntouched++
-                    logger.fine(
-                        "leave untouched, not surgically safe: " +
-                                "${classDef.type}->${mutableMethod.name}"
-                    )
                 }
             }
         }
@@ -338,18 +426,16 @@ private fun BytecodePatchContext.runRound(
                     }
                     val thisReg = body.registerCount - paramWidth - 1
                     val superCall = if (thisReg <= 15) {
-                        "invoke-direct {v$thisReg}, $effectiveSuper-><init>()V"
+                        "invoke-direct {v$thisReg}, Ljava/lang/Object;-><init>()V"
                     } else {
-                        "invoke-direct/range {v$thisReg .. v$thisReg}, $effectiveSuper-><init>()V"
+                        "invoke-direct/range {v$thisReg .. v$thisReg}, Ljava/lang/Object;-><init>()V"
                     }
                     ctor.replaceInstruction(superCallIdx, superCall)
                 }
             }
         }
 
-        if (hasTargetField) {
-            mutableClass.fields.removeAll { it.type.isTarget(prefixes) || it.type in deletedClasses }
-        }
+        if (hasTargetField) mutableClass.fields.removeAll { it.type.isTarget(prefixes) || it.type in deletedClasses }
 
         val emptyClinit = mutableClass.methods.firstOrNull { m ->
             m.name == "<clinit>" && m.implementation?.instructions?.toList()
@@ -379,9 +465,7 @@ private fun BytecodePatchContext.scrubSweepReferences(
 
         val isKotlinLambda = classDef.superclass == "Lkotlin/jvm/internal/Lambda;" ||
                 classDef.interfaces.any { it.startsWith("Lkotlin/jvm/functions/Function") }
-        if (isKotlinLambda) {
-            return@classLoop
-        }
+        if (isKotlinLambda) return@classLoop
 
         val hasSweepField = classDef.fields.any { it.type.isTarget(sweep_prefixes) }
         val methodsNeedingWork = classDef.methods.filter { method ->
@@ -397,11 +481,13 @@ private fun BytecodePatchContext.scrubSweepReferences(
                         m.parameterTypes.map { it.toString() } == method.parameterTypes.map { it.toString() }
             } ?: continue
             val impl = mutableMethod.implementation ?: continue
-            if (impl.tryBlocks.isNotEmpty()) continue
             val insns = impl.instructions.toList()
             if (insns.any { it.opcode.name.contains("SWITCH") }) continue
 
+            var allSurgical = true
+            val hadTryBlocks = impl.tryBlocks.isNotEmpty()
             val edits = ArrayList<Pair<Int, String?>>()
+            
             for ((index, insn) in insns.withIndex()) {
                 if (!insn.referencesTarget(sweep_prefixes)) continue
                 val opName = insn.opcode.name
@@ -412,36 +498,45 @@ private fun BytecodePatchContext.scrubSweepReferences(
                         val isMoveResult = nextInsn?.opcode?.name?.startsWith("MOVE_RESULT") == true
                         if (ref.name != "<init>") {
                             if (ref.returnType == "V" || !isMoveResult) {
-                                edits += index to null
+                                edits += index to "nop"
                             } else {
                                 val destReg = (nextInsn as OneRegisterInstruction).registerA
                                 val zeroLoad = zeroLoadFor(destReg, ref.returnType)
                                 edits += index to zeroLoad
-                                edits += (index + 1) to null
+                                edits += (index + 1) to "nop"
                             }
+                        } else {
+                            allSurgical = false
                         }
                     }
-
                     opName.startsWith("SGET") || opName.startsWith("IGET") -> {
                         val fieldType = ((insn as ReferenceInstruction).reference as FieldReference).type
                         val reg = (insn as OneRegisterInstruction).registerA
                         edits += index to zeroLoadFor(reg, fieldType)
                     }
-
-                    opName.startsWith("SPUT") || opName.startsWith("IPUT") -> edits += index to null
+                    opName.startsWith("SPUT") || opName.startsWith("IPUT") -> edits += index to "nop"
+                    opName == "NEW_INSTANCE" || opName == "CONST_CLASS" -> {
+                        val reg = (insn as OneRegisterInstruction).registerA
+                        edits += index to zeroLoadFor(reg, "L")
+                    }
+                    opName == "CHECK_CAST" -> edits += index to "nop"
+                    opName == "INSTANCE_OF" -> {
+                        val destReg = (insn as TwoRegisterInstruction).registerA
+                        edits += index to zeroLoadFor(destReg, "Z")
+                    }
+                    else -> allSurgical = false
                 }
             }
-            if (edits.isNotEmpty()) {
+            
+            if (allSurgical && edits.isNotEmpty()) {
+                if (hadTryBlocks) clearTryBlocks(impl)
                 edits.sortedByDescending { it.first }.forEach { (index, smali) ->
-                    if (smali == null) mutableMethod.removeInstruction(index)
-                    else mutableMethod.replaceInstruction(index, smali)
+                    mutableMethod.replaceInstruction(index, smali!!)
                 }
             }
         }
 
-        if (hasSweepField) {
-            mutableClass.fields.removeAll { it.type.isTarget(sweep_prefixes) }
-        }
+        if (hasSweepField) mutableClass.fields.removeAll { it.type.isTarget(sweep_prefixes) }
     }
 }
 
@@ -461,12 +556,10 @@ private fun referencedTypesOf(classDef: ClassDef): Set<String> {
                     refs += ref.returnType
                     ref.parameterTypes.forEach { refs += it.toString() }
                 }
-
                 is FieldReference -> {
                     refs += ref.definingClass
                     refs += ref.type
                 }
-
                 is TypeReference -> refs += ref.type
             }
         }
@@ -482,7 +575,6 @@ private fun BytecodePatchContext.sweepUnreferenced(
     deletedClasses: MutableSet<String>,
 ): Int {
     if (sweep_prefixes.isEmpty()) return 0
-
     scrubSweepReferences(sweep_prefixes, deletedClasses)
 
     val referencesOf = HashMap<String, Set<String>>()
@@ -532,7 +624,6 @@ fun BytecodePatchContext.removeCodeByPrefix(
 
     while (true) {
         round++
-
         classDefForEach { classDef ->
             if (classDef.type.isTarget(currentPrefixes) && classDef.type !in manifestProtectedClasses) {
                 deletedClasses += classDef.type
@@ -552,7 +643,6 @@ fun BytecodePatchContext.removeCodeByPrefix(
 
         val newlyOrphaned = result.orphanedClasses.filterNot { it in deletedClasses }
         if (newlyOrphaned.isEmpty()) break
-        logger.fine("round $round: cascading ${newlyOrphaned.size} now-empty wrapper class(es)")
         deletedClasses += newlyOrphaned
         currentPrefixes += newlyOrphaned
     }
