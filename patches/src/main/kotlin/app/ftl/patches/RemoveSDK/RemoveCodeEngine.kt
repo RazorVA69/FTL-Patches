@@ -26,12 +26,11 @@ import java.util.logging.Logger
  * 2. Safe override fallback: Do not delete override methods just because they call super.
  * 3. Enhanced surgical path: Zero out destination registers for non-void invokes.
  * 4. Superclass Chain Resolution: Walk up the inheritance chain to find the nearest surviving
- *    superclass when the direct superclass is deleted. Prevents ClassCastException for manifest
- *    components whose intermediate SDK base classes were removed.
+ *    superclass when the direct superclass is deleted.
  * 5. Aggressive Stubbing for Manifest-Protected SDK Classes: If an SDK class is kept solely
- *    because the OS requires it (e.g., AppLovinInitProvider), aggressively stub ALL its methods
- *    to return default values. Prevents ClassNotFoundException when onCreate() tries to
- *    reference deleted SDK dependencies.
+ *    because the OS requires it, aggressively stub ALL its methods to return default values.
+ * 6. VERIFY ERROR FIX: Constructors (<init>) in protected classes must call super.<init>() 
+ *    before returning, otherwise the Dalvik verifier rejects the class.
  */
 
 private fun String.isTarget(prefixes: Collection<String>) = prefixes.any { startsWith(it) }
@@ -101,7 +100,6 @@ private fun BytecodePatchContext.runRound(
     classDefForEach classLoop@{ classDef ->
         if (classDef.type in deletedClasses) return@classLoop
 
-        // FIX: Skip Kotlin merged lambdas and function interfaces entirely.
         val isKotlinLambda = classDef.superclass == "Lkotlin/jvm/internal/Lambda;" ||
                 classDef.interfaces.any { it.startsWith("Lkotlin/jvm/functions/Function") }
         if (isKotlinLambda) {
@@ -131,8 +129,6 @@ private fun BytecodePatchContext.runRound(
 
         val mutableClass = mutableClassDefBy(classDef.type)
         
-        // FIX: Superclass Chain Resolution
-        // Walk up the inheritance chain to find the nearest surviving superclass.
         var effectiveSuper = classDef.superclass ?: "Ljava/lang/Object;"
         if (superIsTarget) {
             var currentSuper = classDef.superclass
@@ -146,9 +142,6 @@ private fun BytecodePatchContext.runRound(
 
         if (targetInterfaces.isNotEmpty()) mutableClass.interfaces.removeAll(targetInterfaces)
 
-        // FIX: Aggressive Stubbing for Manifest-Protected SDK Classes
-        // If this class is an SDK class (matches prefixes) but is kept because the OS requires it
-        // (e.g., AppLovinInitProvider in manifest), we must ensure it does absolutely nothing.
         val isProtectedTarget = classDef.type in manifestProtectedClasses && classDef.type.isTarget(prefixes)
         if (isProtectedTarget) {
             for (method in mutableClass.methods) {
@@ -160,27 +153,42 @@ private fun BytecodePatchContext.runRound(
                 val returnType = method.returnType
                 val stubInstructions = mutableListOf<String>()
                 
-                when (returnType) {
-                    "V" -> stubInstructions.add("return-void")
-                    "Z", "B", "S", "C", "I" -> {
-                        stubInstructions.add("const/4 v0, 0x0")
-                        stubInstructions.add("return v0")
+                // FIX: Constructors MUST call super() before returning.
+                if (method.name == "<init>") {
+                    val paramWidth = method.parameterTypes.sumOf {
+                        if (it.toString() == "J" || it.toString() == "D") 2 else 1
                     }
-                    "J" -> {
-                        stubInstructions.add("const-wide/16 v0, 0x0")
-                        stubInstructions.add("return-wide v0")
+                    val thisReg = impl.registerCount - paramWidth - 1
+                    val superCall = if (thisReg <= 15) {
+                        "invoke-direct {v$thisReg}, $effectiveSuper-><init>()V"
+                    } else {
+                        "invoke-direct/range {v$thisReg .. v$thisReg}, $effectiveSuper-><init>()V"
                     }
-                    "F" -> {
-                        stubInstructions.add("const/4 v0, 0x0")
-                        stubInstructions.add("return v0")
-                    }
-                    "D" -> {
-                        stubInstructions.add("const-wide/16 v0, 0x0")
-                        stubInstructions.add("return-wide v0")
-                    }
-                    else -> {
-                        stubInstructions.add("const/4 v0, 0x0")
-                        stubInstructions.add("return-object v0")
+                    stubInstructions.add(superCall)
+                    stubInstructions.add("return-void")
+                } else {
+                    when (returnType) {
+                        "V" -> stubInstructions.add("return-void")
+                        "Z", "B", "S", "C", "I" -> {
+                            stubInstructions.add("const/4 v0, 0x0")
+                            stubInstructions.add("return v0")
+                        }
+                        "J" -> {
+                            stubInstructions.add("const-wide/16 v0, 0x0")
+                            stubInstructions.add("return-wide v0")
+                        }
+                        "F" -> {
+                            stubInstructions.add("const/4 v0, 0x0")
+                            stubInstructions.add("return v0")
+                        }
+                        "D" -> {
+                            stubInstructions.add("const-wide/16 v0, 0x0")
+                            stubInstructions.add("return-wide v0")
+                        }
+                        else -> {
+                            stubInstructions.add("const/4 v0, 0x0")
+                            stubInstructions.add("return-object v0")
+                        }
                     }
                 }
                 
@@ -307,7 +315,6 @@ private fun BytecodePatchContext.runRound(
                 }
 
                 else -> {
-                    // FIX: Safe Override Fallback
                     result.leftUntouched++
                     logger.fine(
                         "leave untouched, not surgically safe: " +
