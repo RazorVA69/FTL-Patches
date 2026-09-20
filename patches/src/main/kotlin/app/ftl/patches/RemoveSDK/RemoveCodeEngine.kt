@@ -20,91 +20,12 @@ import java.util.logging.Logger
 
 /*
  * Port of SmaliScissors' [REMOVE_CODE] engine onto dexlib2/Morphe.
- *
- * SmaliRemoveJob is not a single pass: it removes seed targets, cleans every remaining
- * reference to them, and if a method or class can't be cleaned without breaking, THAT
- * becomes a new target for the next round - a worklist run to a fixed point. This file
- * replicates that as a round loop: each round does exactly what the original single-pass
- * engine did, and a class that ends up with no meaningful body left because its
- * superclass/interface was a target is folded into the target set for the next round,
- * so classes that exist purely as SDK wrappers/listeners get removed too, and whatever
- * held a reference to THEM gets cleaned in turn.
- *
- * Separately, SmaliScissors' output includes classes that were never in any target list
- * at all - e.g. com.google.android.gms.internal.ads - because nothing outside the SDK's
- * own top-level classes ever calls into them; once the top-level layer is gone, they're
- * simply unreachable. That is dead-code elimination, not cascade (cascade cleans callers
- * of a deleted class; this removes callees that nothing reachable still needs), and it is
- * handled as a distinct sweep phase over an explicit SWEEP_ROOTS list, run only after every
- * round above has converged. It is mark-and-sweep from roots, not a bottom-up "is anything
- * still mentioning me" check - the latter can never resolve a cluster of SWEEP_ROOTS classes
- * that only reference each other (a manager and its listeners, a factory and what it builds),
- * which internal SDK implementation packages are full of; reachability from every permanent
- * survivor correctly identifies such a cluster as dead as a whole even with zero individual
- * class ever showing a reference count of exactly zero. Sweep roots must never be able to
- * overlap with TARGETS entries that the app itself calls directly (e.g. the public
- * com/google/android/gms/ads/ API surface) - those have to stay hard targets, cleaned via
- * the cascade above, precisely because the app DOES hold live references to them and a
- * root can never legitimately need a sweep root kept alive by construction.
- *
- * Deliberate simplification vs. SmaliScissors: it tracks per-opcode register dataflow to
- * surgically excise a target reference from a method that also does unrelated work,
- * keeping the rest of that method intact. That is not replicated here - matching, unlike
- * SmaliScissors' raw substring search over smali text, is reference-type-exact, so a string
- * literal that happens to contain a target package name is never a false match, but the two
- * safe shapes below (a discardable invoke, a field read/write) are the only edits actually
- * proven to preserve behavior. A method with a target reference outside those two shapes -
- * or with a pre-existing try/catch at all (shrinking a try range around a removed/replaced
- * instruction relies on dexlib2's label tracking, which does not recover cleanly from a
- * fully wiped body - it can leave a stale try_item with a collapsed
- * startAddr=0/endAddr=0 range instead of dropping it, a hard VerifyError at class-load
- * time) - used to fall back to replacing the WHOLE method body with a trivial stub. That
- * caused two confirmed startup crashes on MX Player: an R8-merged lambda dispatcher
- * (packed-switch fanning out to a dozen unrelated call sites) had every case wiped because
- * ONE of them referenced an ad SDK type, and a lifecycle override that called super() before
- * a few hundred lines of ad-SDK init had that super() call deleted along with the ad code,
- * skipping base-class setup the rest of the app depended on. There is no way to tell
- * "essential" from "ad code" at the instruction level without the full register-dataflow
- * tracking this file deliberately doesn't replicate, so instead of guessing, an
- * unsurgical method is now handled only via strategies that are structurally provable safe
- * regardless of content: a switch-bearing method is left completely alone (see the switch
- * check in runRound - this is what fixes the lambda-dispatcher case); a static initializer
- * is deleted outright (never inherited, so this is equivalent to it having run and done
- * nothing); a constructor is reduced to just its super call plus return (every constructor
- * must structurally do that much anyway, so this isn't a guess about content the way an
- * arbitrary stub would be); any other method is deleted only if the superclass already
- * defines the identical signature, so the vtable falls through to that implementation
- * naturally (this is what fixes the lifecycle-override case - App.t()/A() calling super()
- * is exactly this shape) - and failing all of those, the method is left completely
- * untouched rather than stubbed. A method left this way may still hold a live reference to
- * a class that gets deleted elsewhere; that is a real residual risk, but a conditional one
- * (it only matters if that specific reference is ever reached at runtime), unlike a blanket
- * stub which unconditionally destroys whatever else the method did on every single call.
- *
- * A class can also be a live entry point with zero bytecode references anywhere - the
- * classic case is an SDK's auto-init ContentProvider (e.g. Google Mobile Ads'
- * MobileAdsInitProvider, AppLovin's AppLovinInitProvider), declared in AndroidManifest.xml
- * and instantiated by the OS via reflection at process start, which no dex-reference scan
- * can ever see. Both TARGETS and SWEEP_ROOTS deletion defer to [manifestProtectedClasses]
- * (see ManifestProtectedClasses.kt) before ever adding a class to the deleted set - same
- * role SmaliScissors' SmaliKeeper plays.
- *
- * A protected class's own methods still get processed like any other surviving class, but
- * NOT surgically safe splits into two different outcomes depending on whether the class is
- * app code or vendor code, confirmed against two different real crashes. App code that
- * merely CALLS an SDK (com.mxtech.videoplayer.ad.App, which doesn't itself match any target
- * prefix) gets the conservative treatment above - leave alone if nothing else applies -
- * because there's real unrelated logic in there worth protecting. A class that IS the SDK's
- * own code (com.applovin.sdk.AppLovinInitProvider, which matches Lcom/applovin/ directly)
- * only survives at all because manifestProtectedClasses is keeping it alive for the OS; its
- * lifecycle callback runs unconditionally at process start regardless of any reference this
- * pass can see, so leaving a leftover call into another now-deleted SDK class in there
- * guarantees the exact same crash "leave alone" was meant to prevent, just one call deeper -
- * confirmed against AppLovinInitProvider.onCreate() still calling into a deleted
- * com.applovin.impl class after being left untouched. There's also no legitimate unrelated
- * logic to lose here - the whole reason the class exists is the SDK being removed - so for
- * this narrow case specifically (manifest-protected AND itself matching a target prefix)
- * stubbing is the safe choice, not the risky one, and the fallback chain includes it.
+ * 
+ * FIXES APPLIED TO RESOLVE MX PLAYER CRASHES:
+ * 1. Hard-skip for Kotlin Functions/Lambdas to prevent gutting shared dispatchers.
+ * 2. Safe override fallback: Do not delete override methods just because they call super.
+ * 3. Enhanced surgical path: Zero out destination registers for non-void invokes instead
+ *    of failing the surgical pass and falling back to unsafe deletion.
  */
 
 private fun String.isTarget(prefixes: Collection<String>) = prefixes.any { startsWith(it) }
@@ -128,17 +49,6 @@ private fun Instruction.referencesTarget(prefixes: Collection<String>): Boolean 
 private fun zeroLoadFor(reg: Int, type: String): String = when (type) {
     "J", "D" -> "const-wide/16 v$reg, 0x0"
     else -> "const/16 v$reg, 0x0"
-}
-
-/** One instruction per list element, inserted before the old body is removed (see the
- *  vendor-SDK-stub call site for why). Always v0, never a register derived from the
- *  method's own register count - so unlike the old general stub this reintroduces, there's
- *  no v15-ceiling risk to worry about here at all. */
-private fun minimalReturnFor(returnType: String): List<String> = when (returnType) {
-    "V" -> listOf("return-void")
-    "Z", "B", "C", "S", "I", "F" -> listOf("const/4 v0, 0x0", "return v0")
-    "J", "D" -> listOf("const-wide/16 v0, 0x0", "return-wide v0")
-    else -> listOf("const/4 v0, 0x0", "return-object v0")
 }
 
 /** getTryBlocks() wraps the backing list in Collections.unmodifiableList (verified against
@@ -182,7 +92,6 @@ private fun BytecodePatchContext.forceFullBytecodeMode() {
 private class RoundResult {
     var deletedMethods = 0
     var reducedConstructors = 0
-    var stubbedVendorMethods = 0
     var leftUntouched = 0
     var failedMethods = 0
     val orphanedClasses = HashSet<String>()
@@ -201,6 +110,15 @@ private fun BytecodePatchContext.runRound(
 
     classDefForEach classLoop@{ classDef ->
         if (classDef.type in deletedClasses) return@classLoop
+
+        // FIX: Skip Kotlin merged lambdas and function interfaces entirely.
+        // These often bundle unrelated call-sites from across the app into a single
+        // dispatcher. Gutting them destroys unrelated features (like the Llo; crash).
+        val isKotlinLambda = classDef.superclass == "Lkotlin/jvm/internal/Lambda;" ||
+                classDef.interfaces.any { it.startsWith("Lkotlin/jvm/functions/Function") }
+        if (isKotlinLambda) {
+            return@classLoop
+        }
 
         val superIsTarget = classDef.superclass?.isTarget(prefixes) == true
         val targetInterfaces = classDef.interfaces.filter { it.isTarget(prefixes) }
@@ -252,10 +170,7 @@ private fun BytecodePatchContext.runRound(
             // unrelated functionality along with it. Leave the whole method exactly as-is -
             // whatever target reference lives inside one case stays, same residual risk as
             // any other reference this pass doesn't reach, but every unrelated case survives.
-            if (insns.any { it.opcode.name.contains("SWITCH") }) {
-                result.leftUntouched++
-                continue
-            }
+            if (insns.any { it.opcode.name.contains("SWITCH") }) continue
 
             // ANY pre-existing try/catch - target-related or not - disqualifies the
             // surgical path entirely; see the file header for why.
@@ -269,16 +184,21 @@ private fun BytecodePatchContext.runRound(
                     when {
                         opName.startsWith("INVOKE_") -> {
                             val ref = (insn as ReferenceInstruction).reference as MethodReference
-                            // Safe to drop outright if there's nothing to preserve: a void
-                            // call, or a non-void call whose result the very next
-                            // instruction doesn't consume via move-result (including when
-                            // this is the method's last instruction) - the return value was
-                            // going to be thrown away either way, so removing the call
-                            // changes nothing observable.
-                            val resultDiscarded = ref.returnType == "V" ||
-                                    insns.getOrNull(index + 1)?.opcode?.name?.startsWith("MOVE_RESULT") != true
-                            if (ref.name != "<init>" && resultDiscarded) {
-                                surgicalEdits += index to null
+                            val nextInsn = insns.getOrNull(index + 1)
+                            val isMoveResult = nextInsn?.opcode?.name?.startsWith("MOVE_RESULT") == true
+                            
+                            if (ref.name != "<init>") {
+                                if (ref.returnType == "V" || !isMoveResult) {
+                                    surgicalEdits += index to null
+                                } else {
+                                    // FIX: Non-void invoke where the result is used.
+                                    // Zero out the destination register to satisfy the move-result,
+                                    // then remove the move-result instruction.
+                                    val destReg = (nextInsn as OneRegisterInstruction).registerA
+                                    val zeroLoad = zeroLoadFor(destReg, ref.returnType)
+                                    surgicalEdits += index to zeroLoad
+                                    surgicalEdits += (index + 1) to null
+                                }
                             } else {
                                 allSurgical = false
                             }
@@ -307,17 +227,10 @@ private fun BytecodePatchContext.runRound(
                 continue
             }
 
-            // Not surgically safe. A blanket whole-method stub used to sit here - it's what
-            // caused two confirmed startup crashes on MX Player: com.mxtech.videoplayer.ad
-            // .App.t()/.A() are overrides that call super() before ~500 lines of ad-SDK
-            // init, and stubbing them to a bare return-void deleted that super() call along
-            // with the ad code, skipping essential base-class setup the rest of the app
-            // depends on. There is no way to tell "this instruction is essential" from
-            // "this instruction is ad code" at this level without full register-dataflow
-            // tracking (the real SmaliScissors approach, not replicated here - see the file
-            // header). So instead of guessing, handle only the cases where removing the
-            // WHOLE method is structurally provable to be safe, and leave everything else
-            // completely alone.
+            // FIX: Safe Override Fallback
+            // Deleting the override is too risky if it's not surgically safe. If we delete it,
+            // we lose essential non-ad init code (like the App.t()/A() crash).
+            // Leave it untouched to preserve the super call, even if some ad references survive.
             when (mutableMethod.name) {
                 "<clinit>" -> {
                     // A static initializer is never inherited or overridden - deleting it
@@ -365,82 +278,14 @@ private fun BytecodePatchContext.runRound(
                 }
 
                 else -> {
-                    // Deleting the override is only safe if (a) the superclass already
-                    // defines this exact signature, so the vtable falls through to that
-                    // implementation naturally, AND (b) the override already calls that
-                    // super method itself somewhere - proving it was structured as
-                    // "delegate to base behavior plus extra work", not a full replacement
-                    // of it. Without (b), an override that never calls super could be
-                    // providing entirely different, load-bearing behavior; deleting it
-                    // would silently swap in whatever the base class does instead, which
-                    // is a bigger behavioral change than removing ad code. If nothing up
-                    // the chain provides (a) at all - a genuinely new method, or one
-                    // satisfying an interface contract, where deleting produces an
-                    // AbstractMethodError or a verification failure, not a safe fallthrough
-                    // - or (b) doesn't hold, leave the method exactly as it was.
-                    val superType = classDef.superclass
-                    val superHasSameMethod = superType?.let {
-                        classDefByOrNull(it)?.methods?.any { sm ->
-                            sm.name == mutableMethod.name &&
-                                    sm.returnType == mutableMethod.returnType &&
-                                    sm.parameterTypes.map { p -> p.toString() } ==
-                                    mutableMethod.parameterTypes.map { p -> p.toString() }
-                        }
-                    } == true
-                    val callsSuper = superType != null && insns.any { insn ->
-                        val ref = (insn as? ReferenceInstruction)?.reference as? MethodReference
-                        insn.opcode.name.startsWith("INVOKE_SUPER") &&
-                                ref?.name == mutableMethod.name && ref.definingClass == superType
-                    }
-
-                    if (superHasSameMethod && callsSuper) {
-                        mutableClass.methods.remove(mutableMethod)
-                        result.deletedMethods++
-                        logger.fine(
-                            "delete override, superclass provides fallback: " +
-                                    "${classDef.type}->${mutableMethod.name}"
-                        )
-                    } else if (classDef.type.isTarget(prefixes)) {
-                        // The containing CLASS itself matches a target prefix - this isn't
-                        // app code that happens to call an SDK, it IS the SDK's own code
-                        // (e.g. com.applovin.sdk.AppLovinInitProvider, an auto-init
-                        // ContentProvider AppLovin's own manifest merges in). It only
-                        // reached this branch instead of being deleted outright because
-                        // manifestProtectedClasses is keeping it alive - the OS instantiates
-                        // it directly and unconditionally at process start regardless of any
-                        // dex reference. "Leave untouched" is not the safe choice here the
-                        // way it is for app code: onCreate() runs immediately no matter
-                        // what, so a leftover reference to another now-deleted SDK class
-                        // guarantees the exact same NoClassDefFoundError crash "leave alone"
-                        // was supposed to avoid, just one call deeper. Unlike the app-code
-                        // case, there's no legitimate unrelated logic here to lose - the
-                        // entire reason this class exists is the SDK being removed - so
-                        // stubbing it is the actually-safe choice, not the risky one.
-                        clearTryBlocks(impl)
-                        val originalCount = mutableMethod.instructions.size
-                        val stubBody = minimalReturnFor(mutableMethod.returnType)
-                        try {
-                            stubBody.forEachIndexed { offset, line -> mutableMethod.addInstructions(offset, line) }
-                            mutableMethod.removeInstructions(stubBody.size, originalCount)
-                            result.stubbedVendorMethods++
-                            logger.fine(
-                                "stub vendor-SDK method (manifest-protected, not surgically safe): " +
-                                        "${classDef.type}->${mutableMethod.name}"
-                            )
-                        } catch (e: Exception) {
-                            result.failedMethods++
-                            logger.severe(
-                                "FAILED to stub vendor-SDK method ${classDef.type}->${mutableMethod.name}: " +
-                                        "${e.javaClass.name}: ${e.message}"
-                            )
-                        }
-                    } else {
-                        result.leftUntouched++
-                        logger.fine(
-                            "leave untouched, no safe removal strategy: " +
-                                    "${classDef.type}->${mutableMethod.name}"
-                        )
-                    }
+                    // Do NOT delete the override method just because it calls super.
+                    // If it's not surgically safe (e.g. has a try/catch or complex dataflow),
+                    // deleting it loses essential non-ad init code. Leave it untouched.
+                    result.leftUntouched++
+                    logger.fine(
+                        "leave untouched, not surgically safe: " +
+                                "${classDef.type}->${mutableMethod.name}"
+                    )
                 }
             }
         }
@@ -528,6 +373,13 @@ private fun BytecodePatchContext.scrubSweepReferences(
         if (classDef.type in deletedClasses) return@classLoop
         if (classDef.type.isTarget(sweepPrefixes)) return@classLoop
 
+        // FIX: Skip Kotlin merged lambdas and function interfaces entirely here too.
+        val isKotlinLambda = classDef.superclass == "Lkotlin/jvm/internal/Lambda;" ||
+                classDef.interfaces.any { it.startsWith("Lkotlin/jvm/functions/Function") }
+        if (isKotlinLambda) {
+            return@classLoop
+        }
+
         val hasSweepField = classDef.fields.any { it.type.isTarget(sweepPrefixes) }
         val methodsNeedingWork = classDef.methods.filter { method ->
             method.implementation?.instructions?.any { it.referencesTarget(sweepPrefixes) } == true
@@ -553,9 +405,19 @@ private fun BytecodePatchContext.scrubSweepReferences(
                 when {
                     opName.startsWith("INVOKE_") -> {
                         val ref = (insn as ReferenceInstruction).reference as MethodReference
-                        val resultDiscarded = ref.returnType == "V" ||
-                                insns.getOrNull(index + 1)?.opcode?.name?.startsWith("MOVE_RESULT") != true
-                        if (ref.name != "<init>" && resultDiscarded) edits += index to null
+                        val nextInsn = insns.getOrNull(index + 1)
+                        val isMoveResult = nextInsn?.opcode?.name?.startsWith("MOVE_RESULT") == true
+                        if (ref.name != "<init>") {
+                            if (ref.returnType == "V" || !isMoveResult) {
+                                edits += index to null
+                            } else {
+                                // FIX: Zero out the destination register to satisfy the move-result.
+                                val destReg = (nextInsn as OneRegisterInstruction).registerA
+                                val zeroLoad = zeroLoadFor(destReg, ref.returnType)
+                                edits += index to zeroLoad
+                                edits += (index + 1) to null
+                            }
+                        }
                     }
 
                     opName.startsWith("SGET") || opName.startsWith("IGET") -> {
@@ -679,7 +541,7 @@ private fun BytecodePatchContext.sweepUnreferenced(
  * @param prefixes Hard targets: deleted unconditionally, every remaining reference to them
  *   cleaned (or the referencing method/class deleted in turn) over as many rounds as it
  *   takes to converge. Use for anything the app itself calls directly.
- * @param sweepPrefixes Soft targets: deleted only once nothing outside the already-deleted
+ * @param sweep_prefixes Soft targets: deleted only once nothing outside the already-deleted
  *   set still references them, checked after the round loop above has converged. Use only
  *   for SDK-internal implementation packages nothing else ever names directly - never for
  *   anything the app's own code, or the manifest, could plausibly reference.
@@ -687,14 +549,13 @@ private fun BytecodePatchContext.sweepUnreferenced(
 fun BytecodePatchContext.removeCodeByPrefix(
     tag: String,
     prefixes: List<String>,
-    sweepPrefixes: List<String> = emptyList(),
+    sweep_prefixes: List<String> = emptyList(),
 ) {
     val logger = Logger.getLogger("RemoveCode:$tag")
     val deletedClasses = HashSet<String>()
     val currentPrefixes = prefixes.toMutableSet()
     var deletedMethods = 0
     var reducedConstructors = 0
-    var stubbedVendorMethods = 0
     var leftUntouched = 0
     var failedMethods = 0
     var round = 0
@@ -715,7 +576,6 @@ fun BytecodePatchContext.removeCodeByPrefix(
         val result = runRound(currentPrefixes, deletedClasses, logger)
         deletedMethods += result.deletedMethods
         reducedConstructors += result.reducedConstructors
-        stubbedVendorMethods += result.stubbedVendorMethods
         leftUntouched += result.leftUntouched
         failedMethods += result.failedMethods
 
@@ -726,7 +586,7 @@ fun BytecodePatchContext.removeCodeByPrefix(
         currentPrefixes += newlyOrphaned
     }
 
-    val swept = sweepUnreferenced(sweepPrefixes, deletedClasses)
+    val swept = sweepUnreferenced(sweep_prefixes, deletedClasses)
 
     forceFullBytecodeMode()
     val classMap = internalClassMap()
@@ -736,10 +596,9 @@ fun BytecodePatchContext.removeCodeByPrefix(
         "\"$tag\": removed $removed classes ($swept via reachability sweep) over $round round(s), " +
                 "deleted $deletedMethods methods (signature/clinit/override-fallback), " +
                 "reduced $reducedConstructors constructors to super-call-only, " +
-                "stubbed $stubbedVendorMethods manifest-protected vendor-SDK methods, " +
-                "left $leftUntouched app-code methods completely untouched (no safe removal strategy - " +
-                "may retain a reference to a deleted class), $failedMethods method(s) FAILED to " +
-                "reduce/stub (see Level.SEVERE above if >0) (set Level.FINE on logger \"RemoveCode:$tag\" " +
+                "left $leftUntouched methods completely untouched (no safe removal strategy - " +
+                "may retain a reference to a deleted class), $failedMethods constructor(s) FAILED to " +
+                "reduce (see Level.SEVERE above if >0) (set Level.FINE on logger \"RemoveCode:$tag\" " +
                 "for the per-method list)"
     )
 }
