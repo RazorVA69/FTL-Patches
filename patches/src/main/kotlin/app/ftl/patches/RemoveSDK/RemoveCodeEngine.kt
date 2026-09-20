@@ -83,13 +83,28 @@ import java.util.logging.Logger
  *
  * A class can also be a live entry point with zero bytecode references anywhere - the
  * classic case is an SDK's auto-init ContentProvider (e.g. Google Mobile Ads'
- * MobileAdsInitProvider), declared in AndroidManifest.xml and instantiated by the OS via
- * reflection at process start, which no dex-reference scan can ever see. Both TARGETS and
- * SWEEP_ROOTS deletion defer to [manifestProtectedClasses] (see ManifestProtectedClasses.kt)
- * before ever adding a class to the deleted set - same role SmaliScissors' SmaliKeeper
- * plays. A protected class still gets its own SDK-referencing methods processed like any
- * other surviving class (surgically cleaned where safe, left alone otherwise); only the
- * class itself is exempt from deletion.
+ * MobileAdsInitProvider, AppLovin's AppLovinInitProvider), declared in AndroidManifest.xml
+ * and instantiated by the OS via reflection at process start, which no dex-reference scan
+ * can ever see. Both TARGETS and SWEEP_ROOTS deletion defer to [manifestProtectedClasses]
+ * (see ManifestProtectedClasses.kt) before ever adding a class to the deleted set - same
+ * role SmaliScissors' SmaliKeeper plays.
+ *
+ * A protected class's own methods still get processed like any other surviving class, but
+ * NOT surgically safe splits into two different outcomes depending on whether the class is
+ * app code or vendor code, confirmed against two different real crashes. App code that
+ * merely CALLS an SDK (com.mxtech.videoplayer.ad.App, which doesn't itself match any target
+ * prefix) gets the conservative treatment above - leave alone if nothing else applies -
+ * because there's real unrelated logic in there worth protecting. A class that IS the SDK's
+ * own code (com.applovin.sdk.AppLovinInitProvider, which matches Lcom/applovin/ directly)
+ * only survives at all because manifestProtectedClasses is keeping it alive for the OS; its
+ * lifecycle callback runs unconditionally at process start regardless of any reference this
+ * pass can see, so leaving a leftover call into another now-deleted SDK class in there
+ * guarantees the exact same crash "leave alone" was meant to prevent, just one call deeper -
+ * confirmed against AppLovinInitProvider.onCreate() still calling into a deleted
+ * com.applovin.impl class after being left untouched. There's also no legitimate unrelated
+ * logic to lose here - the whole reason the class exists is the SDK being removed - so for
+ * this narrow case specifically (manifest-protected AND itself matching a target prefix)
+ * stubbing is the safe choice, not the risky one, and the fallback chain includes it.
  */
 
 private fun String.isTarget(prefixes: Collection<String>) = prefixes.any { startsWith(it) }
@@ -113,6 +128,17 @@ private fun Instruction.referencesTarget(prefixes: Collection<String>): Boolean 
 private fun zeroLoadFor(reg: Int, type: String): String = when (type) {
     "J", "D" -> "const-wide/16 v$reg, 0x0"
     else -> "const/16 v$reg, 0x0"
+}
+
+/** One instruction per list element, inserted before the old body is removed (see the
+ *  vendor-SDK-stub call site for why). Always v0, never a register derived from the
+ *  method's own register count - so unlike the old general stub this reintroduces, there's
+ *  no v15-ceiling risk to worry about here at all. */
+private fun minimalReturnFor(returnType: String): List<String> = when (returnType) {
+    "V" -> listOf("return-void")
+    "Z", "B", "C", "S", "I", "F" -> listOf("const/4 v0, 0x0", "return v0")
+    "J", "D" -> listOf("const-wide/16 v0, 0x0", "return-wide v0")
+    else -> listOf("const/4 v0, 0x0", "return-object v0")
 }
 
 /** getTryBlocks() wraps the backing list in Collections.unmodifiableList (verified against
@@ -156,6 +182,7 @@ private fun BytecodePatchContext.forceFullBytecodeMode() {
 private class RoundResult {
     var deletedMethods = 0
     var reducedConstructors = 0
+    var stubbedVendorMethods = 0
     var leftUntouched = 0
     var failedMethods = 0
     val orphanedClasses = HashSet<String>()
@@ -225,7 +252,10 @@ private fun BytecodePatchContext.runRound(
             // unrelated functionality along with it. Leave the whole method exactly as-is -
             // whatever target reference lives inside one case stays, same residual risk as
             // any other reference this pass doesn't reach, but every unrelated case survives.
-            if (insns.any { it.opcode.name.contains("SWITCH") }) continue
+            if (insns.any { it.opcode.name.contains("SWITCH") }) {
+                result.leftUntouched++
+                continue
+            }
 
             // ANY pre-existing try/catch - target-related or not - disqualifies the
             // surgical path entirely; see the file header for why.
@@ -370,6 +400,40 @@ private fun BytecodePatchContext.runRound(
                             "delete override, superclass provides fallback: " +
                                     "${classDef.type}->${mutableMethod.name}"
                         )
+                    } else if (classDef.type.isTarget(prefixes)) {
+                        // The containing CLASS itself matches a target prefix - this isn't
+                        // app code that happens to call an SDK, it IS the SDK's own code
+                        // (e.g. com.applovin.sdk.AppLovinInitProvider, an auto-init
+                        // ContentProvider AppLovin's own manifest merges in). It only
+                        // reached this branch instead of being deleted outright because
+                        // manifestProtectedClasses is keeping it alive - the OS instantiates
+                        // it directly and unconditionally at process start regardless of any
+                        // dex reference. "Leave untouched" is not the safe choice here the
+                        // way it is for app code: onCreate() runs immediately no matter
+                        // what, so a leftover reference to another now-deleted SDK class
+                        // guarantees the exact same NoClassDefFoundError crash "leave alone"
+                        // was supposed to avoid, just one call deeper. Unlike the app-code
+                        // case, there's no legitimate unrelated logic here to lose - the
+                        // entire reason this class exists is the SDK being removed - so
+                        // stubbing it is the actually-safe choice, not the risky one.
+                        clearTryBlocks(impl)
+                        val originalCount = mutableMethod.instructions.size
+                        val stubBody = minimalReturnFor(mutableMethod.returnType)
+                        try {
+                            stubBody.forEachIndexed { offset, line -> mutableMethod.addInstructions(offset, line) }
+                            mutableMethod.removeInstructions(stubBody.size, originalCount)
+                            result.stubbedVendorMethods++
+                            logger.fine(
+                                "stub vendor-SDK method (manifest-protected, not surgically safe): " +
+                                        "${classDef.type}->${mutableMethod.name}"
+                            )
+                        } catch (e: Exception) {
+                            result.failedMethods++
+                            logger.severe(
+                                "FAILED to stub vendor-SDK method ${classDef.type}->${mutableMethod.name}: " +
+                                        "${e.javaClass.name}: ${e.message}"
+                            )
+                        }
                     } else {
                         result.leftUntouched++
                         logger.fine(
@@ -630,6 +694,7 @@ fun BytecodePatchContext.removeCodeByPrefix(
     val currentPrefixes = prefixes.toMutableSet()
     var deletedMethods = 0
     var reducedConstructors = 0
+    var stubbedVendorMethods = 0
     var leftUntouched = 0
     var failedMethods = 0
     var round = 0
@@ -650,6 +715,7 @@ fun BytecodePatchContext.removeCodeByPrefix(
         val result = runRound(currentPrefixes, deletedClasses, logger)
         deletedMethods += result.deletedMethods
         reducedConstructors += result.reducedConstructors
+        stubbedVendorMethods += result.stubbedVendorMethods
         leftUntouched += result.leftUntouched
         failedMethods += result.failedMethods
 
@@ -670,9 +736,10 @@ fun BytecodePatchContext.removeCodeByPrefix(
         "\"$tag\": removed $removed classes ($swept via reachability sweep) over $round round(s), " +
                 "deleted $deletedMethods methods (signature/clinit/override-fallback), " +
                 "reduced $reducedConstructors constructors to super-call-only, " +
-                "left $leftUntouched methods completely untouched (no safe removal strategy - " +
-                "may retain a reference to a deleted class), $failedMethods constructor(s) FAILED to " +
-                "reduce (see Level.SEVERE above if >0) (set Level.FINE on logger \"RemoveCode:$tag\" " +
+                "stubbed $stubbedVendorMethods manifest-protected vendor-SDK methods, " +
+                "left $leftUntouched app-code methods completely untouched (no safe removal strategy - " +
+                "may retain a reference to a deleted class), $failedMethods method(s) FAILED to " +
+                "reduce/stub (see Level.SEVERE above if >0) (set Level.FINE on logger \"RemoveCode:$tag\" " +
                 "for the per-method list)"
     )
 }
