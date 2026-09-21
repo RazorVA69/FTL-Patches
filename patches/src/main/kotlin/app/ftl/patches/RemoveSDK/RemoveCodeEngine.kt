@@ -54,11 +54,16 @@ import java.util.logging.Logger
  * literal that happens to contain a target package name is never a false match, but the two
  * safe shapes below (a discardable invoke, a field read/write) are the only edits actually
  * proven to preserve behavior. A method with a target reference outside those two shapes -
- * or with a pre-existing try/catch at all (shrinking a try range around a removed/replaced
- * instruction relies on dexlib2's label tracking, which does not recover cleanly from a
- * fully wiped body - it can leave a stale try_item with a collapsed
- * startAddr=0/endAddr=0 range instead of dropping it, a hard VerifyError at class-load
- * time) - used to fall back to replacing the WHOLE method body with a trivial stub. That
+ * or with a target reference inside an actual try-protected code-unit range (shrinking a
+ * try range around a removed/replaced instruction relies on dexlib2's label tracking, which
+ * does not recover cleanly from a fully wiped body - it can leave a stale try_item with a
+ * collapsed startAddr=0/endAddr=0 range instead of dropping it, a hard VerifyError at
+ * class-load time; checked per-instruction against real code-unit offsets, NOT "does this
+ * method have a try/catch anywhere" - a method having unrelated try/catch blocks elsewhere
+ * must never block editing a target reference that sits nowhere near them, confirmed
+ * against a real crash where exactly that blanket rule left a lone, trivially-safe `sput`
+ * of a deleted analytics class untouched, sitting well outside every protected range in the
+ * method) - used to fall back to replacing the WHOLE method body with a trivial stub. That
  * caused two confirmed startup crashes on MX Player: an R8-merged lambda dispatcher
  * (packed-switch fanning out to a dozen unrelated call sites) had every case wiped because
  * ONE of them referenced an ad SDK type, and a lifecycle override that called super() before
@@ -257,14 +262,37 @@ private fun BytecodePatchContext.runRound(
                 continue
             }
 
-            // ANY pre-existing try/catch - target-related or not - disqualifies the
-            // surgical path entirely; see the file header for why.
-            var allSurgical = impl.tryBlocks.isEmpty()
+            // A target-referencing instruction inside a try-protected range is still
+            // disqualified from surgical editing - shrinking a try range around a
+            // removed/replaced instruction can leave a stale, collapsed try_item and a hard
+            // VerifyError at class-load (see the file header). But a method can have
+            // try/catch blocks that have nothing to do with the target reference at all -
+            // confirmed against a real crash where a lone `sput` of a deleted analytics
+            // class sat well outside every protected range in the method, yet a blanket
+            // "this method has ANY try/catch anywhere" gate refused to touch it, leaving the
+            // dangling reference in place. Check actual code-unit ranges instead of asking
+            // whether the method has try blocks at all.
+            val instructionOffsets = IntArray(insns.size)
+            run {
+                var offset = 0
+                insns.forEachIndexed { i, insn ->
+                    instructionOffsets[i] = offset
+                    offset += insn.codeUnits
+                }
+            }
+            val tryRanges = impl.tryBlocks.map { it.startCodeAddress until (it.startCodeAddress + it.codeUnitCount) }
+            fun isProtected(index: Int) = tryRanges.any { instructionOffsets[index] in it }
+
+            var allSurgical = true
             val surgicalEdits = ArrayList<Pair<Int, String?>>()   // index -> replacement smali, null = remove
-            if (allSurgical) {
+            run {
                 for ((index, insn) in insns.withIndex()) {
                     if (!allSurgical) break
                     if (!insn.referencesTarget(prefixes)) continue
+                    if (isProtected(index)) {
+                        allSurgical = false
+                        break
+                    }
                     val opName = insn.opcode.name
                     when {
                         opName.startsWith("INVOKE_") -> {
@@ -582,13 +610,24 @@ private fun BytecodePatchContext.scrubSweepReferences(
                         m.parameterTypes.map { it.toString() } == method.parameterTypes.map { it.toString() }
             } ?: continue
             val impl = mutableMethod.implementation ?: continue
-            if (impl.tryBlocks.isNotEmpty()) continue
             val insns = impl.instructions.toList()
             if (insns.any { it.opcode.name.contains("SWITCH") }) continue
+
+            val instructionOffsets = IntArray(insns.size)
+            run {
+                var offset = 0
+                insns.forEachIndexed { i, insn ->
+                    instructionOffsets[i] = offset
+                    offset += insn.codeUnits
+                }
+            }
+            val tryRanges = impl.tryBlocks.map { it.startCodeAddress until (it.startCodeAddress + it.codeUnitCount) }
+            fun isProtected(index: Int) = tryRanges.any { instructionOffsets[index] in it }
 
             val edits = ArrayList<Pair<Int, String?>>()
             for ((index, insn) in insns.withIndex()) {
                 if (!insn.referencesTarget(sweepPrefixes)) continue
+                if (isProtected(index)) continue
                 val opName = insn.opcode.name
                 when {
                     opName.startsWith("INVOKE_") -> {
