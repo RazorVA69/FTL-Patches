@@ -17,6 +17,8 @@ private val logger = Logger.getLogger("Remove Duplicate Graphics")
 private val DRAWABLE_EXTENSIONS = setOf("png", "webp", "jpg", "jpeg", "gif")
 private val MIPMAP_EXTENSIONS = setOf("png", "webp", "xml")
 
+private class DedupeResult(val removed: Int, val kept: Int)
+
 /**
  * Priority order in which density variants are considered for a single file: start at
  * [target], walk down through every lower density (target-1 ... ldpi), then wrap around to
@@ -48,30 +50,62 @@ private fun densityDirs(dirs: List<File>, density: String): List<File> {
  * never deduped against each other in the same step, only against directories outside that
  * density's set. Matching is exact filename (extension included); "icon.png" is never
  * treated as a duplicate of "icon.webp".
+ *
+ * Duplicates are planned first, then removed per directory, all or nothing: a directory is
+ * only touched when every file in it is a duplicate. Each res/ directory becomes one config
+ * chunk in resources.arsc. When a chunk is emptied completely it is dropped cleanly; when only
+ * some of its files are removed the rebuilt sparse chunk keeps index entries for the removed
+ * ones at offset 0, so those resources resolve to the chunk's first surviving file (the wrong
+ * image at runtime). Directories that also hold unique files are therefore left as they are.
  */
-private fun dedupeType(resDir: File, typePrefix: String, extensions: Set<String>, order: List<String>): Int {
-    var removed = 0
+private fun dedupeType(resDir: File, typePrefix: String, extensions: Set<String>, order: List<String>): DedupeResult {
     val allDirs = typeDirs(resDir, typePrefix)
+    val filesByDir = allDirs.associateWith { dir -> dir.walkTopDown().filter { it.isFile }.toList() }
+    val alive = filesByDir.values.flatten().toMutableSet()
+    val doomed = mutableSetOf<File>()
 
     for (density in order) {
         val refDirs = densityDirs(allDirs, density)
         if (refDirs.isEmpty()) continue
 
-        val refNames = refDirs.flatMap { dir ->
-            dir.walkTopDown().filter { it.isFile && it.extension.lowercase() in extensions }.map { it.name }
-        }.toSet()
+        val refNames = refDirs.flatMap { filesByDir.getValue(it) }
+            .filter { it in alive && it.extension.lowercase() in extensions }
+            .map { it.name }
+            .toSet()
         if (refNames.isEmpty()) continue
 
-        val victimDirs = allDirs.filter { it !in refDirs }
-        for (dir in victimDirs) {
-            dir.walkTopDown()
-                .filter { it.isFile && it.name in refNames }
-                .toList()
-                .forEach { if (it.delete()) removed++ }
+        for (dir in allDirs) {
+            if (dir in refDirs) continue
+            for (file in filesByDir.getValue(dir)) {
+                if (file in alive && file.name in refNames) {
+                    alive.remove(file)
+                    doomed.add(file)
+                }
+            }
         }
     }
 
-    return removed
+    var removed = 0
+    var kept = 0
+
+    for (dir in allDirs) {
+        val files = filesByDir.getValue(dir)
+        val duplicates = files.filter { it in doomed }
+        if (duplicates.isEmpty()) continue
+
+        if (duplicates.size < files.size) {
+            kept += duplicates.size
+            logger.info(
+                "Kept ${duplicates.size} duplicate file(s) in ${dir.name}/ -- directory also holds " +
+                    "${files.size - duplicates.size} unique file(s).",
+            )
+            continue
+        }
+
+        duplicates.forEach { if (it.delete()) removed++ }
+    }
+
+    return DedupeResult(removed, kept)
 }
 
 private fun stripUiModeDirs(resDir: File, uiModes: Set<String>): Int {
@@ -165,6 +199,7 @@ val drawableCleanPatch = resourcePatch(
         var strippedTotal = 0
         var drawableTotal = 0
         var mipmapTotal = 0
+        var keptTotal = 0
 
         resourcesRoot.listFiles { f -> f.isDirectory }.orEmpty().forEach { pkgDir ->
             val resDir = pkgDir.resolve("res")
@@ -173,8 +208,12 @@ val drawableCleanPatch = resourcePatch(
             if (stripSet.isNotEmpty()) {
                 strippedTotal += stripUiModeDirs(resDir, stripSet)
             }
-            drawableTotal += dedupeType(resDir, "drawable", DRAWABLE_EXTENSIONS, order)
-            mipmapTotal += dedupeType(resDir, "mipmap", MIPMAP_EXTENSIONS, order)
+
+            val drawables = dedupeType(resDir, "drawable", DRAWABLE_EXTENSIONS, order)
+            val mipmaps = dedupeType(resDir, "mipmap", MIPMAP_EXTENSIONS, order)
+            drawableTotal += drawables.removed
+            mipmapTotal += mipmaps.removed
+            keptTotal += drawables.kept + mipmaps.kept
 
             resDir.walkBottomUp()
                 .filter { it.isDirectory && it.listFiles()?.isEmpty() == true }
@@ -186,7 +225,8 @@ val drawableCleanPatch = resourcePatch(
         }
         logger.info(
             "Done. Removed $drawableTotal duplicate drawable file(s) and $mipmapTotal " +
-                "duplicate mipmap file(s), across all resource packages.",
+                "duplicate mipmap file(s), across all resource packages. Kept $keptTotal duplicate " +
+                "file(s) that share a directory with unique files.",
         )
     }
 }
