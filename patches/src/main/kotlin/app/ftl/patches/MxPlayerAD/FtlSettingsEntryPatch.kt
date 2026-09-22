@@ -2,14 +2,12 @@ package app.ftl.patches.mxplayerad
 
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation.MatchAfterWithin
-import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
-import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.patch.resourcePatch
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
-import app.morphe.patcher.util.smali.ExternalLabel
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
@@ -33,8 +31,8 @@ internal val ftlSettingsToggles = mutableListOf(
 
 private const val FTL_PREFS_FILE = "ftl_settings"
 
-private const val VIEW_ONCLICK_LISTENER = "Landroid/view/View\$OnClickListener;"
-private const val MULTI_CHOICE_LISTENER = "Landroid/content/DialogInterface\$OnMultiChoiceClickListener;"
+private const val VIEW_ONCLICK_LISTENER = "Landroid/view/View${'$'}OnClickListener;"
+private const val MULTI_CHOICE_LISTENER = "Landroid/content/DialogInterface${'$'}OnMultiChoiceClickListener;"
 
 /**
  * Matches the method that wires the Me tab's "Status Saver" row: sget of the real,
@@ -51,7 +49,7 @@ private object FtlSettingsRowClickFingerprint : Fingerprint(
             location = MatchAfterWithin(3),
         ),
         methodCall(
-            smali = "Landroid/view/View;->setOnClickListener(Landroid/view/View\$OnClickListener;)V",
+            smali = "Landroid/view/View;->setOnClickListener(Landroid/view/View${'$'}OnClickListener;)V",
             location = MatchAfterWithin(3),
         ),
     ),
@@ -67,6 +65,7 @@ internal val addFtlSettingsRowResourcePatch = resourcePatch(
     execute {
         document("res/layout/layout_local_me_page_fragment.xml").use { doc ->
             val original = doc.documentElement.findById("whatsapp_status_saver")
+                ?: error("whatsapp_status_saver row not found in layout_local_me_page_fragment.xml")
             val parent = original.parentNode
 
             // Deep clone keeps the row's card styling, paddings, icon slot and arrow
@@ -86,7 +85,8 @@ internal val addFtlSettingsRowResourcePatch = resourcePatch(
             // Relabel: first node in the clone (row itself or its TextView child) that
             // carries an android:text gets the literal title. Literal, not a new
             // <string>, so strings.xml stays untouched.
-            val labeled = (listOf(clone) + (0 until cloneDescendants.length).map { cloneDescendants.item(it) as Element })
+            val labeled = (listOf(clone) + (0 until cloneDescendants.length)
+                .map { cloneDescendants.item(it) as Element })
                 .firstOrNull { it.hasAttribute("android:text") }
             labeled?.setAttribute("android:text", "FTL Settings")
 
@@ -119,23 +119,23 @@ val addFtlSettingsEntryPatch = bytecodePatch(
         val method = FtlSettingsRowClickFingerprint.method
 
         // Reuse the matched findViewById()'s own registers: registerC is the live root
-        // view (never clobbered), registerD is the id temp, dead after the call - same
-        // for the setOnClickListener listener temp. No fresh registers, no liveness risk.
+        // view (never clobbered), registerD is the id temp, dead after the call. No
+        // fresh registers, no liveness risk.
         val findView = matches[1].instruction as FiveRegisterInstruction
         val rootReg = findView.registerC
         val scratchReg = findView.registerD
+        val rowIdLiteral = "0x%08x".format(FTL_SETTINGS_ROW_ID)
 
-        val insertIndex = matches[2].index + 1
-        method.addInstructionsWithLabels(
-            insertIndex,
+        method.addInstructions(
+            matches[2].index + 1,
             """
-                const v$scratchReg, 0x%08x
+                const v$scratchReg, $rowIdLiteral
                 invoke-virtual {v$rootReg, v$scratchReg}, Landroid/view/View;->findViewById(I)Landroid/view/View;
                 move-result-object v$scratchReg
                 if-eqz v$scratchReg, :cond_ftl_row_skip
-                invoke-virtual {v$scratchReg, p0}, Landroid/view/View;->setOnClickListener(Landroid/view/View\$OnClickListener;)V
+                invoke-virtual {v$scratchReg, p0}, Landroid/view/View;->setOnClickListener(Landroid/view/View${'$'}OnClickListener;)V
                 :cond_ftl_row_skip
-            """.trimIndent().format(FTL_SETTINGS_ROW_ID),
+            """.trimIndent(),
         )
 
         // The host becomes its own listener for both the row click and the dialog's
@@ -147,10 +147,37 @@ val addFtlSettingsEntryPatch = bytecodePatch(
         }
 
         if (host.methods.none { it.name == "onClick" && it.parameters.size == 1 && it.parameters[0].type == "Landroid/view/View;" }) {
-            host.methods.add(buildDialogMethod())
+            val onClickView = ImmutableMethod(
+                host.type,
+                "onClick",
+                listOf(ImmutableMethodParameter("Landroid/view/View;", null, null)),
+                "V",
+                AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
+                null,
+                null,
+                MutableMethodImplementation(8),
+            ).toMutable()
+            onClickView.addInstructions(0, buildDialogSmali())
+            host.methods.add(onClickView)
         }
+
         if (host.methods.none { it.name == "onClick" && it.parameters.size == 3 }) {
-            host.methods.add(persistToggleMethod())
+            val onClickItem = ImmutableMethod(
+                host.type,
+                "onClick",
+                listOf(
+                    ImmutableMethodParameter("Landroid/content/DialogInterface;", null, null),
+                    ImmutableMethodParameter("I", null, null),
+                    ImmutableMethodParameter("Z", null, null),
+                ),
+                "V",
+                AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
+                null,
+                null,
+                MutableMethodImplementation(4),
+            ).toMutable()
+            onClickItem.addInstructions(0, persistToggleSmali())
+            host.methods.add(onClickItem)
         }
     }
 }
@@ -159,87 +186,59 @@ val addFtlSettingsEntryPatch = bytecodePatch(
 // view (its context IS the host Activity), never from p0 - the host is a fragment-ish
 // class, not a Context. Framework AlertDialog on purpose: this build's androidx
 // AlertDialog is obfuscated (see RemoveRecycleBinPatch), android.app.* never is.
-private fun buildDialogMethod(): MutableMethod {
-    val smali = buildString {
-        appendLine("invoke-virtual {p1}, Landroid/view/View;->getContext()Landroid/content/Context;")
-        appendLine("move-result-object v0")
-        appendLine("const-string v1, \"$FTL_PREFS_FILE\"")
-        appendLine("const/4 v2, 0x0")
-        appendLine("invoke-virtual {v0, v1, v2}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;")
-        appendLine("move-result-object v1")
-        appendLine("new-instance v2, Landroid/app/AlertDialog\$Builder;")
-        appendLine("invoke-direct {v2, v0}, Landroid/app/AlertDialog\$Builder;-><init>(Landroid/content/Context;)V")
-        appendLine("const-string v3, \"FTL Settings\"")
-        appendLine("invoke-virtual {v2, v3}, Landroid/app/AlertDialog\$Builder;->setTitle(Ljava/lang/CharSequence;)Landroid/app/AlertDialog\$Builder;")
-        appendLine("const/16 v6, 0x${ftlSettingsToggles.size.toString(16)}")
-        appendLine("new-array v4, v6, [Ljava/lang/String;")
-        ftlSettingsToggles.forEachIndexed { i, (_, label) ->
-            appendLine("const-string v3, \"$label\"")
-            appendLine("const/16 v5, 0x${i.toString(16)}")
-            appendLine("aput-object v3, v4, v5")
-        }
-        appendLine("new-array v7, v6, [Z")
-        ftlSettingsToggles.forEachIndexed { i, (key, _) ->
-            appendLine("const-string v3, \"$key\"")
-            appendLine("const/4 v5, 0x0")
-            appendLine("invoke-interface {v1, v3, v5}, Landroid/content/SharedPreferences;->getBoolean(Ljava/lang/String;Z)Z")
-            appendLine("move-result v3")
-            appendLine("const/16 v5, 0x${i.toString(16)}")
-            appendLine("aput v3, v7, v5")
-        }
-        appendLine("invoke-virtual {v2, v4, v7, p0}, Landroid/app/AlertDialog\$Builder;->setMultiChoiceItems([Ljava/lang/CharSequence;[ZLandroid/content/DialogInterface\$OnMultiChoiceClickListener;)Landroid/app/AlertDialog\$Builder;")
-        appendLine("const-string v3, \"Close\"")
-        appendLine("const/4 v4, 0x0")
-        appendLine("invoke-virtual {v2, v3, v4}, Landroid/app/AlertDialog\$Builder;->setNegativeButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface\$OnClickListener;)Landroid/app/AlertDialog\$Builder;")
-        appendLine("invoke-virtual {v2}, Landroid/app/AlertDialog\$Builder;->show()Landroid/app/AlertDialog;")
-        appendLine("return-void")
+private fun buildDialogSmali(): String = buildString {
+    appendLine("invoke-virtual {p1}, Landroid/view/View;->getContext()Landroid/content/Context;")
+    appendLine("move-result-object v0")
+    appendLine("const-string v1, \"$FTL_PREFS_FILE\"")
+    appendLine("const/4 v2, 0x0")
+    appendLine("invoke-virtual {v0, v1, v2}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;")
+    appendLine("move-result-object v1")
+    appendLine("new-instance v2, Landroid/app/AlertDialog\$Builder;")
+    appendLine("invoke-direct {v2, v0}, Landroid/app/AlertDialog\$Builder;-><init>(Landroid/content/Context;)V")
+    appendLine("const-string v3, \"FTL Settings\"")
+    appendLine("invoke-virtual {v2, v3}, Landroid/app/AlertDialog\$Builder;->setTitle(Ljava/lang/CharSequence;)Landroid/app/AlertDialog\$Builder;")
+    appendLine("const/16 v6, 0x${ftlSettingsToggles.size.toString(16)}")
+    appendLine("new-array v4, v6, [Ljava/lang/String;")
+    ftlSettingsToggles.forEachIndexed { i, (_, label) ->
+        appendLine("const-string v3, \"$label\"")
+        appendLine("const/16 v5, 0x${i.toString(16)}")
+        appendLine("aput-object v3, v4, v5")
     }
-    return ImmutableMethod(
-        null, // definingClass is filled by dexlib2 when added to the class
-        "onClick",
-        listOf(ImmutableMethodParameter("Landroid/view/View;", null, null)),
-        "V",
-        AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-        null,
-        null,
-        MutableMethodImplementation(8),
-    ).toMutable().apply { addInstructions(0, smali.trimIndent()) }
-}
+    appendLine("new-array v7, v6, [Z")
+    ftlSettingsToggles.forEachIndexed { i, (key, _) ->
+        appendLine("const-string v3, \"$key\"")
+        appendLine("const/4 v5, 0x0")
+        appendLine("invoke-interface {v1, v3, v5}, Landroid/content/SharedPreferences;->getBoolean(Ljava/lang/String;Z)Z")
+        appendLine("move-result v3")
+        appendLine("const/16 v5, 0x${i.toString(16)}")
+        appendLine("aput v3, v7, v5")
+    }
+    appendLine("invoke-virtual {v2, v4, v7, p0}, Landroid/app/AlertDialog\$Builder;->setMultiChoiceItems([Ljava/lang/CharSequence;[ZLandroid/content/DialogInterface\$OnMultiChoiceClickListener;)Landroid/app/AlertDialog\$Builder;")
+    appendLine("const-string v3, \"Close\"")
+    appendLine("const/4 v4, 0x0")
+    appendLine("invoke-virtual {v2, v3, v4}, Landroid/app/AlertDialog\$Builder;->setNegativeButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface\$OnClickListener;)Landroid/app/AlertDialog\$Builder;")
+    appendLine("invoke-virtual {v2}, Landroid/app/AlertDialog\$Builder;->show()Landroid/app/AlertDialog;")
+    appendLine("return-void")
+}.trimIndent()
 
 // onClick(DialogInterface, int, boolean): persists each toggle the moment it flips,
 // so converted patches pick the change up on their next run without a restart.
-private fun persistToggleMethod(): MutableMethod {
-    val smali = buildString {
-        appendLine("invoke-static {}, Landroid/app/ActivityThread;->currentApplication()Landroid/app/Application;")
-        appendLine("move-result-object v0")
-        appendLine("const-string v1, \"$FTL_PREFS_FILE\"")
-        appendLine("const/4 v2, 0x0")
-        appendLine("invoke-virtual {v0, v1, v2}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;")
-        appendLine("move-result-object v0")
-        appendLine("invoke-interface {v0}, Landroid/content/SharedPreferences;->edit()Landroid/content/SharedPreferences\$Editor;")
-        appendLine("move-result-object v1")
-        ftlSettingsToggles.forEachIndexed { i, (key, _) ->
-            appendLine("const/16 v2, 0x${i.toString(16)}")
-            appendLine("if-ne p1, v2, :cond_ftl_toggle_$i")
-            appendLine("const-string v3, \"$key\"")
-            appendLine("invoke-interface {v1, v3, p2}, Landroid/content/SharedPreferences\$Editor;->putBoolean(Ljava/lang/String;Z)Landroid/content/SharedPreferences\$Editor;")
-            appendLine(":cond_ftl_toggle_$i")
-        }
-        appendLine("invoke-interface {v1}, Landroid/content/SharedPreferences\$Editor;->apply()V")
-        appendLine("return-void")
+private fun persistToggleSmali(): String = buildString {
+    appendLine("invoke-static {}, Landroid/app/ActivityThread;->currentApplication()Landroid/app/Application;")
+    appendLine("move-result-object v0")
+    appendLine("const-string v1, \"$FTL_PREFS_FILE\"")
+    appendLine("const/4 v2, 0x0")
+    appendLine("invoke-virtual {v0, v1, v2}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;")
+    appendLine("move-result-object v0")
+    appendLine("invoke-interface {v0}, Landroid/content/SharedPreferences;->edit()Landroid/content/SharedPreferences\$Editor;")
+    appendLine("move-result-object v1")
+    ftlSettingsToggles.forEachIndexed { i, (key, _) ->
+        appendLine("const/16 v2, 0x${i.toString(16)}")
+        appendLine("if-ne p1, v2, :cond_ftl_toggle_$i")
+        appendLine("const-string v3, \"$key\"")
+        appendLine("invoke-interface {v1, v3, p2}, Landroid/content/SharedPreferences\$Editor;->putBoolean(Ljava/lang/String;Z)Landroid/content/SharedPreferences\$Editor;")
+        appendLine(":cond_ftl_toggle_$i")
     }
-    return ImmutableMethod(
-        null,
-        "onClick",
-        listOf(
-            ImmutableMethodParameter("Landroid/content/DialogInterface;", null, null),
-            ImmutableMethodParameter("I", null, null),
-            ImmutableMethodParameter("Z", null, null),
-        ),
-        "V",
-        AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
-        null,
-        null,
-        MutableMethodImplementation(4),
-    ).toMutable().apply { addInstructions(0, smali.trimIndent()) }
-}
+    appendLine("invoke-interface {v1}, Landroid/content/SharedPreferences\$Editor;->apply()V")
+    appendLine("return-void")
+}.trimIndent()
