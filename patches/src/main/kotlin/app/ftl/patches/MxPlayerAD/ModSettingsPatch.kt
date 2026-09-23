@@ -75,13 +75,43 @@ internal fun modSettingFlagPatch(key: String) = resourcePatch(
     compatibleWith(COMPATIBILITY_MX_PLAYER_AD)
 
     execute {
+        val name = "ftl_mod_$key"
+
+        document("res/values/public.xml").use { document ->
+            val root = document.documentElement
+            val nodes = root.getElementsByTagName("public")
+            var typeBase = -1L
+            var maxEntry = -1L
+            var declared = false
+
+            for (i in 0 until nodes.length) {
+                val element = nodes.item(i) as? Element ?: continue
+                if (element.getAttribute("type") != "bool") continue
+
+                val id = element.getAttribute("id").substring(2).toLong(16)
+                typeBase = id and 0xFFFF0000L
+                maxEntry = maxOf(maxEntry, id and 0xFFFFL)
+                if (element.getAttribute("name") == name) declared = true
+            }
+
+            if (typeBase < 0) error("No bool entries in public.xml to derive the bool type id from.")
+
+            if (!declared) {
+                val entry = document.createElement("public")
+                entry.setAttribute("type", "bool")
+                entry.setAttribute("name", name)
+                entry.setAttribute("id", "0x%08x".format(typeBase or (maxEntry + 1)))
+                root.appendChild(entry)
+            }
+        }
+
         val file = get(MOD_FLAGS_FILE, false)
         file.parentFile?.mkdirs()
         if (!file.exists()) {
             file.writeText("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n</resources>\n")
         }
 
-        val entry = "<bool name=\"ftl_mod_$key\">true</bool>"
+        val entry = "<bool name=\"$name\">true</bool>"
         val text = file.readText()
         if (entry !in text) {
             file.writeText(text.replace("</resources>", "    $entry\n</resources>"))
