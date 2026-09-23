@@ -3,17 +3,17 @@ package app.ftl.extension.mxplayerad;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.content.res.Resources;
 import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import java.io.IOException;
+
 public final class ModSettings {
     private static final String PREFS = "ftl_mod_settings";
-    private static final String FLAG_PREFIX = "ftl_mod_";
-    private static final String FALLBACK_PACKAGE = "com.mxtech.videoplayer.ad";
+    private static final String FLAG_DIR = "ftl_mod";
 
     private static final Entry[] ENTRIES = {
         new Entry(
@@ -100,10 +100,15 @@ public final class ModSettings {
     }
 
     private static boolean isPatched(Context context, String key) {
-        Resources resources = context.getResources();
-        String name = FLAG_PREFIX + key;
-        return resources.getIdentifier(name, "bool", context.getPackageName()) != 0
-            || resources.getIdentifier(name, "bool", FALLBACK_PACKAGE) != 0;
+        try {
+            String[] names = context.getAssets().list(FLAG_DIR);
+            if (names == null) return false;
+            for (String name : names) {
+                if (name.equals(key)) return true;
+            }
+        } catch (IOException ignored) {
+        }
+        return false;
     }
 
     private static Context context() {
