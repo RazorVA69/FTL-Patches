@@ -108,7 +108,7 @@ val addFtlSettingsEntryPatch = bytecodePatch(
                 AccessFlags.PUBLIC.value, // NOT final: android:onClick reflects on it
                 null,
                 null,
-                MutableMethodImplementation(10), // Bumped to 10 registers (v0-v7 + p0-p1)
+                MutableMethodImplementation(10), // 8 v-registers + 2 params (this, View)
             ).toMutable()
             handler.addInstructions(0, buildDialogSmali())
             host.methods.add(handler)
@@ -127,7 +127,7 @@ val addFtlSettingsEntryPatch = bytecodePatch(
                 AccessFlags.PUBLIC.value or AccessFlags.FINAL.value,
                 null,
                 null,
-                MutableMethodImplementation(7), // Bumped to 7 registers
+                MutableMethodImplementation(8), // FIXED: 4 v-registers + 4 params (this, DialogInterface, int, boolean)
             ).toMutable()
             onClickItem.addInstructions(0, persistToggleSmali())
             host.methods.add(onClickItem)
@@ -162,7 +162,7 @@ private fun buildDialogSmali(): String = buildString {
         appendLine("invoke-interface {v1, v3, v5}, Landroid/content/SharedPreferences;->getBoolean(Ljava/lang/String;Z)Z")
         appendLine("move-result v3")
         appendLine("const/16 v5, 0x${i.toString(16)}")
-        appendLine("aput v3, v7, v5")
+        appendLine("aput-boolean v3, v7, v5") // FIXED: aput-boolean for primitive boolean array
     }
     appendLine("invoke-virtual {v2, v4, v7, p0}, Landroid/app/AlertDialog\$Builder;->setMultiChoiceItems([Ljava/lang/CharSequence;[ZLandroid/content/DialogInterface\$OnMultiChoiceClickListener;)Landroid/app/AlertDialog\$Builder;")
     appendLine("const-string v3, \"Close\"")
@@ -176,7 +176,7 @@ private fun buildDialogSmali(): String = buildString {
 // Uses ActivityThread.currentApplication() to get a Context since p0 is not a Context.
 private fun persistToggleSmali(): String = buildString {
     appendLine("invoke-static {}, Landroid/app/ActivityThread;->currentApplication()Landroid/app/Application;")
-    appendLine("move-result-object v0") // v0 = Application (extends Context)
+    appendLine("move-result-object v0") // v0 = Application
     appendLine("const-string v1, \"$FTL_PREFS_FILE\"")
     appendLine("const/4 v2, 0x0")
     appendLine("invoke-virtual {v0, v1, v2}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;")
