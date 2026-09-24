@@ -9,6 +9,28 @@ private const val MOD_SETTINGS_ROW_CLASS = "app.ftl.extension.mxplayerad.ModSett
 private const val MOD_FLAGS_DIR = "assets/ftl_mod"
 private const val MOD_ICON_FILE = "res/drawable/ic_me_tab_mod_settings.xml"
 private const val APP_NAMESPACE = "http://schemas.android.com/apk/res-auto"
+private const val MOD_VIEW_HIDER_CLASS = "app.ftl.extension.mxplayerad.ModViewHider"
+
+internal const val KEY_ME_HIDE_STATUS_SAVER = "me_hide_status_saver"
+internal const val KEY_ME_HIDE_LEGAL_HELP = "me_hide_legal_help"
+internal const val KEY_ME_HIDE_TILES_PAGER = "me_hide_tiles_pager"
+internal const val KEY_ME_HIDE_MUSIC_PLAYER = "me_hide_music_player"
+internal const val KEY_ME_HIDE_CLOUD_DRIVE = "me_hide_cloud_drive"
+internal const val KEY_ME_SHOW_NETWORK_STREAM = "me_show_network_stream"
+internal const val KEY_HIDE_PRIVATE_FOLDER = "hide_private_folder"
+internal const val KEY_HIDE_FILE_TRANSFER = "hide_file_transfer"
+internal const val KEY_HIDE_ADD_TO_PLAYLIST = "hide_add_to_playlist"
+
+internal fun Element.addModViewHider(key: String, target: String, mode: String) {
+    val parent = parentNode as? Element
+        ?: error("@id/$target is the layout root, so a hider cannot be added next to it.")
+    val marker = ownerDocument.createElement(MOD_VIEW_HIDER_CLASS)
+    marker.setAttribute("android:layout_width", "0dp")
+    marker.setAttribute("android:layout_height", "0dp")
+    marker.setAttribute("android:visibility", "gone")
+    marker.setAttribute("android:tag", "$key|$target|$mode")
+    parent.insertBefore(marker, this)
+}
 
 private val MOD_ICON_XML = """
     <?xml version="1.0" encoding="utf-8"?>
