@@ -51,6 +51,14 @@ public final class ModSettings {
             false
         ),
         new Entry(
+            "Home screen",
+            "me_hide_tiles_pager",
+            "Hide local tiles pager",
+            "Hides the local tiles pager and its indicator.",
+            true,
+            false
+        ),
+        new Entry(
             "Me tab",
             "me_hide_status_saver",
             "Hide Status Saver row",
@@ -68,17 +76,9 @@ public final class ModSettings {
         ),
         new Entry(
             "Me tab",
-            "me_hide_tiles_pager",
-            "Hide local tiles pager",
-            "Hides the local tiles pager and its indicator.",
-            true,
-            false
-        ),
-        new Entry(
-            "Me tab",
             "me_hide_music_player",
             "Hide Music Player tile",
-            null,
+            "Removes the Music Player tile from the Me tab.",
             true,
             true
         ),
@@ -86,7 +86,7 @@ public final class ModSettings {
             "Me tab",
             "me_hide_cloud_drive",
             "Hide Cloud Drive tile",
-            null,
+            "Removes the Cloud Drive tile from the Me tab.",
             true,
             true
         ),
@@ -102,7 +102,7 @@ public final class ModSettings {
             "Hidden features",
             "hide_private_folder",
             "Hide Private Folder",
-            "Me tab tile, per-file more sheet and multi-select menu.",
+            "Hidden everywhere: Me tab tile, 3-dot menu of each file, and the multi-select menu.",
             true,
             true
         ),
@@ -110,7 +110,7 @@ public final class ModSettings {
             "Hidden features",
             "hide_file_transfer",
             "Hide File Transfer",
-            "Me tab tile, per-file more sheet and multi-select menu.",
+            "Hidden everywhere: Me tab tile, 3-dot menu of each file, and the multi-select menu.",
             true,
             true
         ),
@@ -118,7 +118,7 @@ public final class ModSettings {
             "Hidden features",
             "hide_add_to_playlist",
             "Hide Add to Playlist",
-            "Per-file more sheet, multi-select menu and split toolbar.",
+            "Hidden everywhere: 3-dot menu of each file, the multi-select menu, and the split toolbar.",
             true,
             false
         ),
