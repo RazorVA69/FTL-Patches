@@ -3,7 +3,7 @@ package app.ftl.patches.mxplayerad
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation.MatchAfterImmediately
 import app.morphe.patcher.InstructionLocation.MatchAfterWithin
-import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.removeInstructions
 import app.morphe.patcher.fieldAccess
 import app.morphe.patcher.literal
@@ -106,7 +106,7 @@ val configureSmartEnhanceToastPatch = bytecodePatch(
         // which the verifier would reject at install time.
         method.removeInstructions(matches[7].index, matches[8].index - matches[7].index + 1)
 
-        method.addInstructions(
+        method.addInstructionsWithLabels(
             insertIndex,
             """
                 const-string v4, "$SMART_ENHANCE_TOAST_KEY"
