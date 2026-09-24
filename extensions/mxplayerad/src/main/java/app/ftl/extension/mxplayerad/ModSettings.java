@@ -16,6 +16,8 @@ import android.widget.Switch;
 import android.widget.TextView;
 
 import java.io.IOException;
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -76,7 +78,7 @@ public final class ModSettings {
             "Me tab",
             "me_hide_music_player",
             "Hide Music Player tile",
-            "The app reloads when you close this dialog.",
+            null,
             true,
             true
         ),
@@ -84,7 +86,7 @@ public final class ModSettings {
             "Me tab",
             "me_hide_cloud_drive",
             "Hide Cloud Drive tile",
-            "The app reloads when you close this dialog.",
+            null,
             true,
             true
         ),
@@ -92,7 +94,7 @@ public final class ModSettings {
             "Me tab",
             "me_show_network_stream",
             "Network Stream tile",
-            "Replaces the Video Playlists tile with Network Stream. The app reloads when you close this dialog.",
+            "Replaces the Video Playlists tile with Network Stream.",
             true,
             true
         ),
@@ -100,7 +102,7 @@ public final class ModSettings {
             "Hidden features",
             "hide_private_folder",
             "Hide Private Folder",
-            "Me tab tile (the app reloads when you close this dialog), per-file more sheet and multi-select menu.",
+            "Me tab tile, per-file more sheet and multi-select menu.",
             true,
             true
         ),
@@ -108,7 +110,7 @@ public final class ModSettings {
             "Hidden features",
             "hide_file_transfer",
             "Hide File Transfer",
-            "Me tab tile (the app reloads when you close this dialog), per-file more sheet and multi-select menu.",
+            "Me tab tile, per-file more sheet and multi-select menu.",
             true,
             true
         ),
@@ -123,6 +125,8 @@ public final class ModSettings {
     };
 
     private static Context appContext;
+    private static WeakReference<Object> tilesOwner;
+    private static String tilesMethod;
 
     private ModSettings() {}
 
@@ -131,6 +135,24 @@ public final class ModSettings {
         boolean def = entry != null && entry.def;
         SharedPreferences prefs = prefs(context());
         return prefs == null ? def : prefs.getBoolean(key, def);
+    }
+
+    public static void onTilesOwner(Object owner, String method) {
+        tilesOwner = new WeakReference<Object>(owner);
+        tilesMethod = method;
+    }
+
+    private static boolean refreshTiles() {
+        Object owner = tilesOwner == null ? null : tilesOwner.get();
+        if (owner == null || tilesMethod == null) return false;
+        try {
+            Method method = owner.getClass().getDeclaredMethod(tilesMethod);
+            method.setAccessible(true);
+            method.invoke(owner);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     public static void set(String key, boolean value) {
@@ -143,6 +165,7 @@ public final class ModSettings {
         AlertDialog.Builder builder = new AlertDialog.Builder(host);
         Context dc = builder.getContext();
         final Map<String, Boolean> initial = new HashMap<String, Boolean>();
+        final boolean[] refreshFailed = {false};
 
         LinearLayout list = new LinearLayout(dc);
         list.setOrientation(LinearLayout.VERTICAL);
@@ -168,7 +191,7 @@ public final class ModSettings {
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             }
             shown++;
-            if (entry.restart) initial.put(entry.key, get(entry.key));
+            if (entry.tiles) initial.put(entry.key, get(entry.key));
 
             Switch toggle = new Switch(dc);
             toggle.setText(entry.title);
@@ -178,6 +201,7 @@ public final class ModSettings {
                 @Override
                 public void onCheckedChanged(CompoundButton button, boolean checked) {
                     set(entry.key, checked);
+                    if (entry.tiles && !refreshTiles()) refreshFailed[0] = true;
                 }
             });
             list.addView(toggle, new LinearLayout.LayoutParams(
@@ -209,6 +233,7 @@ public final class ModSettings {
             .setOnDismissListener(new DialogInterface.OnDismissListener() {
                 @Override
                 public void onDismiss(DialogInterface dialog) {
+                    if (!refreshFailed[0]) return;
                     for (Map.Entry<String, Boolean> before : initial.entrySet()) {
                         if (get(before.getKey()) != before.getValue().booleanValue()) {
                             restartActivity(host);
@@ -283,15 +308,15 @@ public final class ModSettings {
         final String title;
         final String summary;
         final boolean def;
-        final boolean restart;
+        final boolean tiles;
 
-        Entry(String group, String key, String title, String summary, boolean def, boolean restart) {
+        Entry(String group, String key, String title, String summary, boolean def, boolean tiles) {
             this.group = group;
             this.key = key;
             this.title = title;
             this.summary = summary;
             this.def = def;
-            this.restart = restart;
+            this.tiles = tiles;
         }
     }
 }
