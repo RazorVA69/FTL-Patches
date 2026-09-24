@@ -1,7 +1,11 @@
 package app.ftl.extension.mxplayerad;
 
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.ContextWrapper;
+import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Typeface;
 import android.util.TypedValue;
@@ -12,6 +16,8 @@ import android.widget.Switch;
 import android.widget.TextView;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class ModSettings {
     private static final String PREFS = "ftl_mod_settings";
@@ -23,6 +29,7 @@ public final class ModSettings {
             "speedup_no_ui",
             "No UI",
             "On: the long-press SpeedUp overlay never shows. Off: 2x UI.",
+            false,
             false
         ),
         new Entry(
@@ -30,69 +37,79 @@ public final class ModSettings {
             "smart_enhance_skip_popup",
             "Skip intro popup",
             "On: the player menu item toggles Smart Enhance directly, without the popup and animation. Off: stock popup.",
-            true
+            true,
+            false
         ),
         new Entry(
             "Smart Enhance",
             "smart_enhance_toast",
             "Toast on enable",
             "On: toast when Smart Enhance turns on. Off: silent toggle.",
-            true
+            true,
+            false
         ),
         new Entry(
             "Me tab",
             "me_hide_status_saver",
             "Hide Status Saver row",
             "Collapses the WhatsApp Status Saver row.",
-            true
+            true,
+            false
         ),
         new Entry(
             "Me tab",
             "me_hide_legal_help",
             "Hide Legal / Help group",
             "Hides Legal, Help and Data privacy.",
-            true
+            true,
+            false
         ),
         new Entry(
             "Me tab",
             "me_hide_tiles_pager",
             "Hide local tiles pager",
             "Hides the local tiles pager and its indicator.",
-            true
+            true,
+            false
         ),
         new Entry(
             "Me tab",
             "me_hide_music_player",
             "Hide Music Player tile",
-            "Applies the next time the Me tab loads.",
+            "The app reloads when you close this dialog.",
+            true,
             true
         ),
         new Entry(
             "Me tab",
             "me_hide_cloud_drive",
             "Hide Cloud Drive tile",
-            "Applies the next time the Me tab loads.",
+            "The app reloads when you close this dialog.",
+            true,
             true
         ),
         new Entry(
             "Me tab",
             "me_show_network_stream",
             "Network Stream tile",
-            "Replaces the Video Playlists tile with Network Stream. Applies the next time the Me tab loads.",
+            "Replaces the Video Playlists tile with Network Stream. The app reloads when you close this dialog.",
+            true,
             true
         ),
         new Entry(
             "Hidden features",
             "hide_private_folder",
             "Hide Private Folder",
-            "Me tab tile, per-file more sheet and multi-select menu.",
+            "Me tab tile (the app reloads when you close this dialog), per-file more sheet and multi-select menu.",
+            true,
             true
         ),
         new Entry(
             "Hidden features",
             "hide_file_transfer",
             "Hide File Transfer",
-            "Me tab tile, per-file more sheet and multi-select menu.",
+            "Me tab tile (the app reloads when you close this dialog), per-file more sheet and multi-select menu.",
+            true,
             true
         ),
         new Entry(
@@ -100,7 +117,8 @@ public final class ModSettings {
             "hide_add_to_playlist",
             "Hide Add to Playlist",
             "Per-file more sheet, multi-select menu and split toolbar.",
-            true
+            true,
+            false
         ),
     };
 
@@ -121,9 +139,10 @@ public final class ModSettings {
         ModViewHider.refreshAll();
     }
 
-    public static void showDialog(Context host) {
+    public static void showDialog(final Context host) {
         AlertDialog.Builder builder = new AlertDialog.Builder(host);
         Context dc = builder.getContext();
+        final Map<String, Boolean> initial = new HashMap<String, Boolean>();
 
         LinearLayout list = new LinearLayout(dc);
         list.setOrientation(LinearLayout.VERTICAL);
@@ -149,6 +168,7 @@ public final class ModSettings {
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             }
             shown++;
+            if (entry.restart) initial.put(entry.key, get(entry.key));
 
             Switch toggle = new Switch(dc);
             toggle.setText(entry.title);
@@ -186,7 +206,36 @@ public final class ModSettings {
         builder.setTitle("Mod Settings")
             .setView(scroll)
             .setPositiveButton(android.R.string.ok, null)
+            .setOnDismissListener(new DialogInterface.OnDismissListener() {
+                @Override
+                public void onDismiss(DialogInterface dialog) {
+                    for (Map.Entry<String, Boolean> before : initial.entrySet()) {
+                        if (get(before.getKey()) != before.getValue().booleanValue()) {
+                            restartActivity(host);
+                            return;
+                        }
+                    }
+                }
+            })
             .show();
+    }
+
+    private static void restartActivity(Context context) {
+        Activity activity = activityOf(context);
+        if (activity == null || activity.isFinishing()) return;
+        Intent intent = new Intent(activity.getIntent());
+        intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
+        activity.finish();
+        activity.startActivity(intent);
+        activity.overridePendingTransition(0, 0);
+    }
+
+    private static Activity activityOf(Context context) {
+        while (context instanceof ContextWrapper) {
+            if (context instanceof Activity) return (Activity) context;
+            context = ((ContextWrapper) context).getBaseContext();
+        }
+        return null;
     }
 
     private static Entry find(String key) {
@@ -234,13 +283,15 @@ public final class ModSettings {
         final String title;
         final String summary;
         final boolean def;
+        final boolean restart;
 
-        Entry(String group, String key, String title, String summary, boolean def) {
+        Entry(String group, String key, String title, String summary, boolean def, boolean restart) {
             this.group = group;
             this.key = key;
             this.title = title;
             this.summary = summary;
             this.def = def;
+            this.restart = restart;
         }
     }
 }
