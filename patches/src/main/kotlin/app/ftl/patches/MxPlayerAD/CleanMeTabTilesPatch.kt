@@ -2,6 +2,7 @@ package app.ftl.patches.mxplayerad
 
 import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.InstructionLocation
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.fieldAccess
@@ -261,5 +262,13 @@ internal val cleanMeTabTilesPatch = bytecodePatch(
         )
 
         edits.sortedByDescending { it.first }.forEach { it.second() }
+
+        method.addInstructions(
+            0,
+            """
+                const-string v0, "${method.name}"
+                invoke-static {p0, v0}, $MOD_SETTINGS_CLASS->onTilesOwner(Ljava/lang/Object;Ljava/lang/String;)V
+            """.trimIndent(),
+        )
     }
 }
