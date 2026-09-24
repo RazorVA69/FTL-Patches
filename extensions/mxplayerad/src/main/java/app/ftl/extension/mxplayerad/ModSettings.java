@@ -39,6 +39,69 @@ public final class ModSettings {
             "On: toast when Smart Enhance turns on. Off: silent toggle.",
             true
         ),
+        new Entry(
+            "Me tab",
+            "me_hide_status_saver",
+            "Hide Status Saver row",
+            "Collapses the WhatsApp Status Saver row.",
+            true
+        ),
+        new Entry(
+            "Me tab",
+            "me_hide_legal_help",
+            "Hide Legal / Help group",
+            "Hides Legal, Help and Data privacy.",
+            true
+        ),
+        new Entry(
+            "Me tab",
+            "me_hide_tiles_pager",
+            "Hide local tiles pager",
+            "Hides the local tiles pager and its indicator.",
+            true
+        ),
+        new Entry(
+            "Me tab",
+            "me_hide_music_player",
+            "Hide Music Player tile",
+            "Applies the next time the Me tab loads.",
+            true
+        ),
+        new Entry(
+            "Me tab",
+            "me_hide_cloud_drive",
+            "Hide Cloud Drive tile",
+            "Applies the next time the Me tab loads.",
+            true
+        ),
+        new Entry(
+            "Me tab",
+            "me_show_network_stream",
+            "Network Stream tile",
+            "Replaces the Video Playlists tile with Network Stream. Applies the next time the Me tab loads.",
+            true
+        ),
+        new Entry(
+            "Hidden features",
+            "hide_private_folder",
+            "Hide Private Folder",
+            "Me tab tile, per-file more sheet and multi-select menu.",
+            true
+        ),
+        new Entry(
+            "Hidden features",
+            "hide_file_transfer",
+            "Hide File Transfer",
+            "Me tab tile, per-file more sheet and multi-select menu.",
+            true
+        ),
+        new Entry(
+            "Hidden features",
+            "hide_add_to_playlist",
+            "Hide Add to Playlist",
+            "Per-file more sheet, multi-select menu and split toolbar.",
+            true
+        ),
     };
 
     private static Context appContext;
@@ -55,6 +118,7 @@ public final class ModSettings {
     public static void set(String key, boolean value) {
         SharedPreferences prefs = prefs(context());
         if (prefs != null) prefs.edit().putBoolean(key, value).apply();
+        ModViewHider.refreshAll();
     }
 
     public static void showDialog(Context host) {
