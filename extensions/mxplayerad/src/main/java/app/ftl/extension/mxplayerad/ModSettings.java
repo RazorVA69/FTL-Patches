@@ -3,6 +3,8 @@ package app.ftl.extension.mxplayerad;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Typeface;
+import android.util.TypedValue;
 import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -17,20 +19,23 @@ public final class ModSettings {
 
     private static final Entry[] ENTRIES = {
         new Entry(
+            "SpeedUp overlay",
             "speedup_no_ui",
-            "SpeedUp overlay: No UI",
+            "No UI",
             "On: the long-press SpeedUp overlay never shows. Off: 2x UI.",
             false
         ),
         new Entry(
+            "Smart Enhance",
             "smart_enhance_skip_popup",
-            "Smart Enhance: skip intro popup",
+            "Skip intro popup",
             "On: the player menu item toggles Smart Enhance directly, without the popup and animation. Off: stock popup.",
             true
         ),
         new Entry(
+            "Smart Enhance",
             "smart_enhance_toast",
-            "Smart Enhance: toast on enable",
+            "Toast on enable",
             "On: toast when Smart Enhance turns on. Off: silent toggle.",
             true
         ),
@@ -61,14 +66,30 @@ public final class ModSettings {
         list.setPadding(dp(dc, 24), dp(dc, 8), dp(dc, 24), dp(dc, 8));
 
         int shown = 0;
+        String lastGroup = null;
         for (final Entry entry : ENTRIES) {
             if (!isPatched(dc, entry.key)) continue;
+
+            if (!entry.group.equals(lastGroup)) {
+                lastGroup = entry.group;
+                TextView header = new TextView(dc);
+                header.setText(entry.group);
+                header.setTextSize(14f);
+                header.setTypeface(null, Typeface.BOLD);
+                TypedValue accent = new TypedValue();
+                if (dc.getTheme().resolveAttribute(android.R.attr.colorAccent, accent, true)) {
+                    header.setTextColor(accent.data);
+                }
+                header.setPadding(0, dp(dc, shown == 0 ? 4 : 20), 0, dp(dc, 4));
+                list.addView(header, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            }
             shown++;
 
             Switch toggle = new Switch(dc);
             toggle.setText(entry.title);
             toggle.setChecked(get(entry.key));
-            toggle.setPadding(0, dp(dc, 12), 0, dp(dc, 4));
+            toggle.setPadding(0, dp(dc, 10), 0, dp(dc, 2));
             toggle.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
                 @Override
                 public void onCheckedChanged(CompoundButton button, boolean checked) {
@@ -144,12 +165,14 @@ public final class ModSettings {
     }
 
     private static final class Entry {
+        final String group;
         final String key;
         final String title;
         final String summary;
         final boolean def;
 
-        Entry(String key, String title, String summary, boolean def) {
+        Entry(String group, String key, String title, String summary, boolean def) {
+            this.group = group;
             this.key = key;
             this.title = title;
             this.summary = summary;
