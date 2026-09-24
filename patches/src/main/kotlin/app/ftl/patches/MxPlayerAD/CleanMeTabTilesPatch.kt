@@ -207,7 +207,6 @@ internal val cleanMeTabTilesPatch = bytecodePatch(
         val musicNext = method.getInstruction(musicPlayerIndex + 3)
         val videoStock = method.getInstruction(videoPlaylistsIndex - 2)
         val videoNext = method.getInstruction(videoPlaylistsIndex + 1)
-        val privateStock = method.getInstruction(privateFolderIndex - 6)
         val privateNext = method.getInstruction(privateFolderIndex - 4)
         val shareNext = method.getInstruction(mxShareIndex - 4)
 
@@ -222,25 +221,6 @@ internal val cleanMeTabTilesPatch = bytecodePatch(
                 """.trimIndent(),
                 ExternalLabel("next", next),
             )
-
-        fun forceFlagOff(
-            index: Int,
-            key: String,
-            stock: Instruction,
-            next: Instruction,
-        ) = method.addInstructionsWithLabels(
-            index - 6,
-            """
-                const-string v1, "$key"
-                invoke-static {v1}, $MOD_SETTINGS_CLASS->get(Ljava/lang/String;)Z
-                move-result v1
-                if-eqz v1, :stock
-                const/4 v1, 0x0
-                goto :next
-            """.trimIndent(),
-            ExternalLabel("stock", stock),
-            ExternalLabel("next", next),
-        )
 
         fun forceFlagOffAfterCompute(index: Int, key: String, consumer: Instruction) =
             method.addInstructionsWithLabels(
@@ -276,7 +256,7 @@ internal val cleanMeTabTilesPatch = bytecodePatch(
                     ExternalLabel("next", videoNext),
                 )
             },
-            privateFolderIndex to { forceFlagOff(privateFolderIndex, KEY_HIDE_PRIVATE_FOLDER, privateStock, privateNext) },
+            privateFolderIndex to { forceFlagOffAfterCompute(privateFolderIndex, KEY_HIDE_PRIVATE_FOLDER, privateNext) },
             mxShareIndex to { forceFlagOffAfterCompute(mxShareIndex, KEY_HIDE_FILE_TRANSFER, shareNext) },
         )
 
