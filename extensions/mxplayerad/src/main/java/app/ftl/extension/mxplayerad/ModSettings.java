@@ -22,6 +22,18 @@ public final class ModSettings {
             "On: the long-press SpeedUp overlay never shows. Off: 2x UI.",
             false
         ),
+        new Entry(
+            "smart_enhance_skip_popup",
+            "Smart Enhance: skip intro popup",
+            "On: the player menu item toggles Smart Enhance directly, without the popup and animation. Off: stock popup.",
+            true
+        ),
+        new Entry(
+            "smart_enhance_toast",
+            "Smart Enhance: toast on enable",
+            "On: toast when Smart Enhance turns on. Off: silent toggle.",
+            true
+        ),
     };
 
     private static Context appContext;
