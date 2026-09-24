@@ -209,7 +209,6 @@ internal val cleanMeTabTilesPatch = bytecodePatch(
         val videoNext = method.getInstruction(videoPlaylistsIndex + 1)
         val privateStock = method.getInstruction(privateFolderIndex - 6)
         val privateNext = method.getInstruction(privateFolderIndex - 4)
-        val shareStock = method.getInstruction(mxShareIndex - 6)
         val shareNext = method.getInstruction(mxShareIndex - 4)
 
         fun skipTile(index: Int, key: String, next: Instruction) =
@@ -243,6 +242,19 @@ internal val cleanMeTabTilesPatch = bytecodePatch(
             ExternalLabel("next", next),
         )
 
+        fun forceFlagOffAfterCompute(index: Int, key: String, consumer: Instruction) =
+            method.addInstructionsWithLabels(
+                index - 4,
+                """
+                    const-string v2, "$key"
+                    invoke-static {v2}, $MOD_SETTINGS_CLASS->get(Ljava/lang/String;)Z
+                    move-result v2
+                    if-eqz v2, :keep
+                    const/4 v1, 0x0
+                """.trimIndent(),
+                ExternalLabel("keep", consumer),
+            )
+
         // Highest index first so the lower indices computed above stay valid.
         val edits = listOf(
             cloudDriveIndex to { skipTile(cloudDriveIndex, KEY_ME_HIDE_CLOUD_DRIVE, cloudNext) },
@@ -265,7 +277,7 @@ internal val cleanMeTabTilesPatch = bytecodePatch(
                 )
             },
             privateFolderIndex to { forceFlagOff(privateFolderIndex, KEY_HIDE_PRIVATE_FOLDER, privateStock, privateNext) },
-            mxShareIndex to { forceFlagOff(mxShareIndex, KEY_HIDE_FILE_TRANSFER, shareStock, shareNext) },
+            mxShareIndex to { forceFlagOffAfterCompute(mxShareIndex, KEY_HIDE_FILE_TRANSFER, shareNext) },
         )
 
         edits.sortedByDescending { it.first }.forEach { it.second() }
