@@ -9,10 +9,9 @@ import app.morphe.patcher.string
 import app.morphe.patcher.InstructionLocation
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
+import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
 import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.util.smali.ExternalLabel
-import com.android.tools.smali.dexlib2.builder.BuilderOffsetInstruction
-import com.android.tools.smali.dexlib2.builder.Label
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
@@ -29,12 +28,6 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * pinned since its defining class/name are obfuscated and reshuffle every build - only
  * its primitive `Z` type + opcode shape + position between the two real anchors identify it.
  */
-context(patchContext: app.morphe.patcher.patch.BytecodePatchContext)
-private fun app.morphe.patcher.Fingerprint.target(matchIndex: Int): Label {
-    val index = instructionMatches[matchIndex].index
-    return (method.implementation!!.instructions[index] as BuilderOffsetInstruction).target
-}
-
 private object RecycleBinTileFingerprint : Fingerprint(
     definingClass = "Lcom/mxtech/videoplayer/ad/subscriptions/ui/metab/viewmodels/LocalMePageViewModel;",
     filters = listOf(
@@ -72,9 +65,14 @@ val removeRecycleBinPatch = bytecodePatch(
         // safe scratch here too (confirmed against the real y() smali, not assumed).
         // Registers its own onTilesOwner so the tile updates live even if Clean Me Tab
         // isn't applied in the same build; redundant (harmless) if it is.
+        // :cond_b6 found the same way the original (unconditional) version of this
+        // patch found it - string -> invoke-direct -> invoke-virtual(add) -> :cond_b6 -
+        // rather than my own Label-based target() helper, since that's unproven for
+        // this specific fingerprint and this offset is already known-correct.
         val tilesMethod = RecycleBinTileFingerprint.method
         val blockStart = RecycleBinTileFingerprint.instructionMatches[0].index
-        val hideTarget = RecycleBinTileFingerprint.target(2).location.instruction!!
+        val stringIndex = RecycleBinTileFingerprint.instructionMatches[3].index
+        val hideTarget = tilesMethod.getInstruction(stringIndex + 3)
 
         tilesMethod.addInstructionsWithLabels(
             blockStart,
