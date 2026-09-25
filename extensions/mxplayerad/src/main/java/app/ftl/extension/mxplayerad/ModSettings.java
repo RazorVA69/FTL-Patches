@@ -246,8 +246,6 @@ public final class ModSettings {
         TypedValue ripple = new TypedValue();
         final boolean hasRipple = dc.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true);
         final int rippleRes = ripple.resourceId;
-        TypedValue textColor = new TypedValue();
-        final boolean hasTextColor = dc.getTheme().resolveAttribute(android.R.attr.textColorPrimary, textColor, true);
 
         for (final Entry entry : ENTRIES) {
             if (!isPatched(dc, entry.key)) continue;
@@ -263,8 +261,7 @@ public final class ModSettings {
 
                 if (!groupContent.isEmpty()) {
                     View divider = new View(dc);
-                    divider.setBackgroundColor(hasTextColor ? textColor.data : 0xFF888888);
-                    divider.getBackground().setAlpha(40);
+                    divider.setBackgroundColor(0x33888888);
                     list.addView(divider, new LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT, dp(dc, 1)));
                 }
@@ -282,7 +279,10 @@ public final class ModSettings {
                 title.setText(groupName);
                 title.setTextSize(16f);
                 title.setTypeface(null, Typeface.BOLD);
-                if (hasTextColor) title.setTextColor(textColor.data);
+                // No explicit color: inherits the dialog theme's default text color, which
+                // renders correctly (setTextColor(android.R.attr.textColorPrimary)'s resolved
+                // TypedValue.data is a ColorStateList reference, not a raw color - using it
+                // directly made the title invisible).
                 headerRow.addView(title, new LinearLayout.LayoutParams(
                     0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
