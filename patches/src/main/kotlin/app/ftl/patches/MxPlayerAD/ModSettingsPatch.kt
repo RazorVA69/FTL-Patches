@@ -20,6 +20,15 @@ internal const val KEY_ME_SHOW_NETWORK_STREAM = "me_show_network_stream"
 internal const val KEY_HIDE_PRIVATE_FOLDER = "hide_private_folder"
 internal const val KEY_HIDE_FILE_TRANSFER = "hide_file_transfer"
 internal const val KEY_HIDE_ADD_TO_PLAYLIST = "hide_add_to_playlist"
+internal const val KEY_SIDEBAR_HIDE_BOOKMARK = "sidebar_hide_bookmark"
+internal const val KEY_SIDEBAR_HIDE_FAVOURITE = "sidebar_hide_favourite"
+internal const val KEY_SIDEBAR_HIDE_ADD_TO_PLAYLIST = "sidebar_hide_add_to_playlist"
+internal const val KEY_SIDEBAR_HIDE_TUTORIAL = "sidebar_hide_tutorial"
+internal const val KEY_SIDEBAR_HIDE_PLAYING_QUEUE = "sidebar_hide_playing_queue"
+internal const val KEY_SIDEBAR_HIDE_VIDEO_DISPLAY = "sidebar_hide_video_display"
+internal const val KEY_SIDEBAR_HIDE_HELP = "sidebar_hide_help"
+internal const val KEY_SUBTITLE_OPEN_SETTINGS = "subtitle_open_settings"
+internal const val KEY_SHORTCUTS_CHANGE_DEFAULTS = "shortcuts_change_defaults"
 
 internal fun Element.addModViewHider(key: String, target: String, mode: String) {
     val parent = parentNode as? Element
