@@ -75,15 +75,15 @@ val removeRecycleBinPatch = bytecodePatch(
         val hideTarget = tilesMethod.getInstruction(stringIndex + 3)
 
         tilesMethod.addInstructionsWithLabels(
-            blockStart,
-            """
-                const-string v1, "$KEY_ME_HIDE_RECYCLE_BIN"
-                invoke-static {v1}, $MOD_SETTINGS_CLASS->get(Ljava/lang/String;)Z
-                move-result v1
-                if-nez v1, :hide
-            """.trimIndent(),
-            ExternalLabel("hide", hideTarget),
-        )
+    blockStart + 1,   // insert AFTER the RecycleBinManager sget-object, not before it
+    """
+        const-string v1, "$KEY_ME_HIDE_RECYCLE_BIN"
+        invoke-static {v1}, $MOD_SETTINGS_CLASS->get(Ljava/lang/String;)Z
+        move-result v1
+        if-nez v1, :hide
+    """.trimIndent(),
+    ExternalLabel("hide", hideTarget),
+)
 
         tilesMethod.addInstructions(
             0,
