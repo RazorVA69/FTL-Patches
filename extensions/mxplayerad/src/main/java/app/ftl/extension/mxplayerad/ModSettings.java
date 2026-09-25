@@ -14,6 +14,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.view.Gravity;
 import android.view.View;
 
 import java.io.IOException;
@@ -242,6 +243,11 @@ public final class ModSettings {
         TypedValue accent = new TypedValue();
         final boolean hasAccent = dc.getTheme().resolveAttribute(android.R.attr.colorAccent, accent, true);
         final int accentColor = accent.data;
+        TypedValue ripple = new TypedValue();
+        final boolean hasRipple = dc.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true);
+        final int rippleRes = ripple.resourceId;
+        TypedValue textColor = new TypedValue();
+        final boolean hasTextColor = dc.getTheme().resolveAttribute(android.R.attr.textColorPrimary, textColor, true);
 
         for (final Entry entry : ENTRIES) {
             if (!isPatched(dc, entry.key)) continue;
@@ -253,25 +259,51 @@ public final class ModSettings {
                 final LinearLayout newContent = new LinearLayout(dc);
                 newContent.setOrientation(LinearLayout.VERTICAL);
                 newContent.setVisibility(View.GONE);
-                newContent.setPadding(0, 0, 0, dp(dc, 8));
+                newContent.setPadding(0, dp(dc, 4), 0, dp(dc, 12));
+
+                if (!groupContent.isEmpty()) {
+                    View divider = new View(dc);
+                    divider.setBackgroundColor(hasTextColor ? textColor.data : 0xFF888888);
+                    divider.getBackground().setAlpha(40);
+                    list.addView(divider, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, dp(dc, 1)));
+                }
 
                 final String groupName = entry.group;
-                final TextView header = new TextView(dc);
-                header.setText("\u25B8  " + groupName);
-                header.setTextSize(14f);
-                header.setTypeface(null, Typeface.BOLD);
-                if (hasAccent) header.setTextColor(accentColor);
-                header.setPadding(0, dp(dc, groupContent.isEmpty() ? 4 : 20), 0, dp(dc, 8));
-                header.setOnClickListener(new View.OnClickListener() {
+                LinearLayout headerRow = new LinearLayout(dc);
+                headerRow.setOrientation(LinearLayout.HORIZONTAL);
+                headerRow.setGravity(Gravity.CENTER_VERTICAL);
+                headerRow.setPadding(0, dp(dc, 14), 0, dp(dc, 14));
+                headerRow.setClickable(true);
+                headerRow.setFocusable(true);
+                if (hasRipple) headerRow.setBackgroundResource(rippleRes);
+
+                TextView title = new TextView(dc);
+                title.setText(groupName);
+                title.setTextSize(16f);
+                title.setTypeface(null, Typeface.BOLD);
+                if (hasTextColor) title.setTextColor(textColor.data);
+                headerRow.addView(title, new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+                final TextView chevron = new TextView(dc);
+                chevron.setText("\u25B8");
+                chevron.setTextSize(16f);
+                if (hasAccent) chevron.setTextColor(accentColor);
+                chevron.setPadding(dp(dc, 8), 0, 0, 0);
+                headerRow.addView(chevron, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+                headerRow.setOnClickListener(new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
                         boolean expand = newContent.getVisibility() != View.VISIBLE;
                         newContent.setVisibility(expand ? View.VISIBLE : View.GONE);
-                        header.setText((expand ? "\u25BE  " : "\u25B8  ") + groupName);
+                        chevron.setText(expand ? "\u25BE" : "\u25B8");
                     }
                 });
 
-                list.addView(header, new LinearLayout.LayoutParams(
+                list.addView(headerRow, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
                 list.addView(newContent, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
