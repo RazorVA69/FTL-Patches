@@ -130,50 +130,59 @@ val removeRecycleBinPatch = bytecodePatch(
         ).toMutable()
 
         showMethod.addInstructions(
-            0,
-            """
-                invoke-virtual {p0}, Landroid/app/Dialog;->getContext()Landroid/content/Context;
-                move-result-object v0
+    0,
+    """
+        const-string v0, "$KEY_ME_HIDE_RECYCLE_BIN"
+        invoke-static {v0}, $MOD_SETTINGS_CLASS->get(Ljava/lang/String;)Z
+        move-result v0
+        if-eqz v0, :stock
 
-                new-instance v1, Landroidx/appcompat/app/d${'$'}a;
-                invoke-direct {v1, v0}, Landroidx/appcompat/app/d${'$'}a;-><init>(Landroid/content/Context;)V
+        invoke-virtual {p0}, Landroid/app/Dialog;->getContext()Landroid/content/Context;
+        move-result-object v0
 
-                iget-object v2, v1, Landroidx/appcompat/app/d${'$'}a;->b:Landroidx/appcompat/app/AlertController${'$'}b;
+        new-instance v1, Landroidx/appcompat/app/d${'$'}a;
+        invoke-direct {v1, v0}, Landroidx/appcompat/app/d${'$'}a;-><init>(Landroid/content/Context;)V
 
-                const-string v3, "Delete"
-                iput-object v3, v2, Landroidx/appcompat/app/AlertController${'$'}b;->e:Ljava/lang/CharSequence;
+        iget-object v2, v1, Landroidx/appcompat/app/d${'$'}a;->b:Landroidx/appcompat/app/AlertController${'$'}b;
 
-                const-string v3, "The following file will be deleted permanently."
-                iput-object v3, v2, Landroidx/appcompat/app/AlertController${'$'}b;->g:Ljava/lang/CharSequence;
+        const-string v3, "Delete"
+        iput-object v3, v2, Landroidx/appcompat/app/AlertController${'$'}b;->e:Ljava/lang/CharSequence;
 
-                const-string v3, "OK"
-                invoke-virtual {v1, v3, p0}, Landroidx/appcompat/app/d${'$'}a;->h(Ljava/lang/CharSequence;Landroid/content/DialogInterface${'$'}OnClickListener;)V
+        const-string v3, "The following file will be deleted permanently."
+        iput-object v3, v2, Landroidx/appcompat/app/AlertController${'$'}b;->g:Ljava/lang/CharSequence;
 
-                const-string v2, "Cancel"
-                const/4 v3, 0x0
-                invoke-virtual {v1, v2, v3}, Landroidx/appcompat/app/d${'$'}a;->e(Ljava/lang/CharSequence;Landroid/content/DialogInterface${'$'}OnClickListener;)V
+        const-string v3, "OK"
+        invoke-virtual {v1, v3, p0}, Landroidx/appcompat/app/d${'$'}a;->h(Ljava/lang/CharSequence;Landroid/content/DialogInterface${'$'}OnClickListener;)V
 
-                invoke-virtual {v1}, Landroidx/appcompat/app/d${'$'}a;->n()Landroidx/appcompat/app/d;
-                move-result-object v1
+        const-string v2, "Cancel"
+        const/4 v3, 0x0
+        invoke-virtual {v1, v2, v3}, Landroidx/appcompat/app/d${'$'}a;->e(Ljava/lang/CharSequence;Landroid/content/DialogInterface${'$'}OnClickListener;)V
 
-                sget v4, Landroid/R${'$'}id;->button1:I
-                invoke-virtual {v1, v4}, Landroid/app/Dialog;->findViewById(I)Landroid/view/View;
-                move-result-object v4
+        invoke-virtual {v1}, Landroidx/appcompat/app/d${'$'}a;->n()Landroidx/appcompat/app/d;
+        move-result-object v1
 
-                if-eqz v4, :cond_end
+        sget v4, Landroid/R${'$'}id;->button1:I
+        invoke-virtual {v1, v4}, Landroid/app/Dialog;->findViewById(I)Landroid/view/View;
+        move-result-object v4
 
-                invoke-virtual {v4}, Landroid/view/View;->getLayoutParams()Landroid/view/ViewGroup${'$'}LayoutParams;
-                move-result-object v0
-                check-cast v0, Landroid/view/ViewGroup${'$'}MarginLayoutParams;
-                iget v3, v0, Landroid/view/ViewGroup${'$'}MarginLayoutParams;->leftMargin:I
-                add-int/lit8 v3, v3, 0x3c
-                iput v3, v0, Landroid/view/ViewGroup${'$'}MarginLayoutParams;->leftMargin:I
-                invoke-virtual {v4, v0}, Landroid/view/View;->setLayoutParams(Landroid/view/ViewGroup${'$'}LayoutParams;)V
+        if-eqz v4, :cond_end
 
-                :cond_end
-                return-void
-            """.trimIndent(),
-        )
+        invoke-virtual {v4}, Landroid/view/View;->getLayoutParams()Landroid/view/ViewGroup${'$'}LayoutParams;
+        move-result-object v0
+        check-cast v0, Landroid/view/ViewGroup${'$'}MarginLayoutParams;
+        iget v3, v0, Landroid/view/ViewGroup${'$'}MarginLayoutParams;->leftMargin:I
+        add-int/lit8 v3, v3, 0x3c
+        iput v3, v0, Landroid/view/ViewGroup${'$'}MarginLayoutParams;->leftMargin:I
+        invoke-virtual {v4, v0}, Landroid/view/View;->setLayoutParams(Landroid/view/ViewGroup${'$'}LayoutParams;)V
+
+        :cond_end
+        return-void
+
+        :stock
+        invoke-super {p0}, Landroidx/appcompat/app/d;->show()V
+        return-void
+    """.trimIndent(),
+)
 
         dialogClass.methods.add(showMethod)
 
