@@ -119,7 +119,7 @@ internal val cleanSidebarShortcutItemsPatch = bytecodePatch(
             TutorialFingerprint,
             TutorialFingerprint.instructionMatches[0].index,
             KEY_SIDEBAR_HIDE_TUTORIAL,
-            TutorialFingerprint.target(1).location.instruction,
+            TutorialFingerprint.target(1).location.instruction!!,
         )
 
         // Favourite and Add to Playlist share one stock guard (Lswb;->g:Z) and sit back to
@@ -133,7 +133,7 @@ internal val cleanSidebarShortcutItemsPatch = bytecodePatch(
             AddToPlaylistFingerprint,
             atpInsertIndex,
             KEY_SIDEBAR_HIDE_ADD_TO_PLAYLIST,
-            FavouriteFingerprint.target(1).location.instruction,
+            FavouriteFingerprint.target(1).location.instruction!!,
         )
         val atpCheckEntry = AddToPlaylistFingerprint.method.getInstruction(atpInsertIndex)
         conditionalHide(
@@ -147,14 +147,14 @@ internal val cleanSidebarShortcutItemsPatch = bytecodePatch(
             BookmarkFingerprint,
             BookmarkFingerprint.instructionMatches[0].index,
             KEY_SIDEBAR_HIDE_BOOKMARK,
-            BookmarkFingerprint.target(1).location.instruction,
+            BookmarkFingerprint.target(1).location.instruction!!,
         )
 
         conditionalHide(
             PlayingQueueFingerprint,
             PlayingQueueFingerprint.instructionMatches[0].index,
             KEY_SIDEBAR_HIDE_PLAYING_QUEUE,
-            PlayingQueueFingerprint.target(5).location.instruction,
+            PlayingQueueFingerprint.target(5).location.instruction!!,
         )
     }
 }
