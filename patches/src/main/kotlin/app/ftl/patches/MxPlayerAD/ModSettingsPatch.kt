@@ -29,6 +29,8 @@ internal const val KEY_SIDEBAR_HIDE_VIDEO_DISPLAY = "sidebar_hide_video_display"
 internal const val KEY_SIDEBAR_HIDE_HELP = "sidebar_hide_help"
 internal const val KEY_SUBTITLE_OPEN_SETTINGS = "subtitle_open_settings"
 internal const val KEY_SHORTCUTS_CHANGE_DEFAULTS = "shortcuts_change_defaults"
+internal const val KEY_HOME_HIDE_BOTTOM_BAR = "home_hide_bottom_bar"
+internal const val KEY_ME_HIDE_RECYCLE_BIN = "me_hide_recycle_bin"
 
 internal fun Element.addModViewHider(key: String, target: String, mode: String) {
     val parent = parentNode as? Element
