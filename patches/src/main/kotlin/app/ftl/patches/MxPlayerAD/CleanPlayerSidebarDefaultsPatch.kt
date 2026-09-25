@@ -174,4 +174,7 @@ val cleanSidebarShortcutsPatch = bytecodePatch(
         defaultShortcutsPatch,
         openSubtitleSettingsByDefaultPatch,
     )
+
+    enableDefaultShortcutsOption()
+    defaultShortcutsMaskOption()
 }
