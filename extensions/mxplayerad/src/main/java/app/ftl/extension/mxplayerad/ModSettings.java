@@ -62,6 +62,15 @@ public final class ModSettings {
             false
         ),
         new Entry(
+            "Home screen",
+            "home_hide_bottom_bar",
+            "Hide bottom navigation bar",
+            "Applies the next time the bottom bar would show or hide. The Me tab button in the " +
+                "toolbar stays either way, so this switch can never lock you out of itself.",
+            true,
+            false
+        ),
+        new Entry(
             "Me tab",
             "me_hide_status_saver",
             "Hide Status Saver row",
@@ -98,6 +107,15 @@ public final class ModSettings {
             "me_show_network_stream",
             "Network Stream tile",
             "Replaces the Video Playlists tile with Network Stream.",
+            true,
+            true
+        ),
+        new Entry(
+            "Me tab",
+            "me_hide_recycle_bin",
+            "Hide Recycle Bin tile",
+            "Only hides the tile - deleted files are always removed permanently while this patch " +
+                "is applied, on or off.",
             true,
             true
         ),
