@@ -14,11 +14,13 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.view.View;
 
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 public final class ModSettings {
@@ -122,6 +124,70 @@ public final class ModSettings {
             true,
             false
         ),
+        new Entry(
+            "Sidebar",
+            "sidebar_hide_bookmark",
+            "Hide Bookmark",
+            "Removes the Bookmark shortcut from the player sidebar.",
+            true,
+            false
+        ),
+        new Entry(
+            "Sidebar",
+            "sidebar_hide_favourite",
+            "Hide Favourite",
+            "Removes the Favourite shortcut. If Add to Playlist is also hidden, hiding this hides both.",
+            true,
+            false
+        ),
+        new Entry(
+            "Sidebar",
+            "sidebar_hide_add_to_playlist",
+            "Hide Add to Playlist",
+            "Removes the Add to Playlist shortcut from the player sidebar.",
+            true,
+            false
+        ),
+        new Entry(
+            "Sidebar",
+            "sidebar_hide_tutorial",
+            "Hide Tutorial",
+            "Removes the Tutorial shortcut from the player sidebar.",
+            true,
+            false
+        ),
+        new Entry(
+            "Sidebar",
+            "sidebar_hide_playing_queue",
+            "Hide Playing Queue",
+            "Removes the Playing Queue shortcut from the player sidebar.",
+            true,
+            false
+        ),
+        new Entry(
+            "Sidebar",
+            "sidebar_hide_video_display",
+            "Hide Video Display row",
+            "Hides the Video Display row in the player sidebar.",
+            true,
+            false
+        ),
+        new Entry(
+            "Sidebar",
+            "sidebar_hide_help",
+            "Hide More menu Help section",
+            "Hides What's New, Features, FAQ, Check for Update, Bug Report and About.",
+            true,
+            false
+        ),
+        new Entry(
+            "Sidebar",
+            "subtitle_open_settings",
+            "Open subtitle settings by default",
+            "Expands Sync/Speed/Panel/Customization the next time you open the subtitle menu.",
+            true,
+            false
+        ),
     };
 
     private static Context appContext;
@@ -172,26 +238,47 @@ public final class ModSettings {
         list.setPadding(dp(dc, 24), dp(dc, 8), dp(dc, 24), dp(dc, 8));
 
         int shown = 0;
-        String lastGroup = null;
+        Map<String, LinearLayout> groupContent = new LinkedHashMap<String, LinearLayout>();
+        TypedValue accent = new TypedValue();
+        final boolean hasAccent = dc.getTheme().resolveAttribute(android.R.attr.colorAccent, accent, true);
+        final int accentColor = accent.data;
+
         for (final Entry entry : ENTRIES) {
             if (!isPatched(dc, entry.key)) continue;
-
-            if (!entry.group.equals(lastGroup)) {
-                lastGroup = entry.group;
-                TextView header = new TextView(dc);
-                header.setText(entry.group);
-                header.setTextSize(14f);
-                header.setTypeface(null, Typeface.BOLD);
-                TypedValue accent = new TypedValue();
-                if (dc.getTheme().resolveAttribute(android.R.attr.colorAccent, accent, true)) {
-                    header.setTextColor(accent.data);
-                }
-                header.setPadding(0, dp(dc, shown == 0 ? 4 : 20), 0, dp(dc, 4));
-                list.addView(header, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-            }
             shown++;
             if (entry.tiles) initial.put(entry.key, get(entry.key));
+
+            LinearLayout content = groupContent.get(entry.group);
+            if (content == null) {
+                final LinearLayout newContent = new LinearLayout(dc);
+                newContent.setOrientation(LinearLayout.VERTICAL);
+                newContent.setVisibility(View.GONE);
+                newContent.setPadding(0, 0, 0, dp(dc, 8));
+
+                final String groupName = entry.group;
+                final TextView header = new TextView(dc);
+                header.setText("\u25B8  " + groupName);
+                header.setTextSize(14f);
+                header.setTypeface(null, Typeface.BOLD);
+                if (hasAccent) header.setTextColor(accentColor);
+                header.setPadding(0, dp(dc, groupContent.isEmpty() ? 4 : 20), 0, dp(dc, 8));
+                header.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        boolean expand = newContent.getVisibility() != View.VISIBLE;
+                        newContent.setVisibility(expand ? View.VISIBLE : View.GONE);
+                        header.setText((expand ? "\u25BE  " : "\u25B8  ") + groupName);
+                    }
+                });
+
+                list.addView(header, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                list.addView(newContent, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+                groupContent.put(entry.group, newContent);
+                content = newContent;
+            }
 
             Switch toggle = new Switch(dc);
             toggle.setText(entry.title);
@@ -204,7 +291,7 @@ public final class ModSettings {
                     if (entry.tiles && !refreshTiles()) refreshFailed[0] = true;
                 }
             });
-            list.addView(toggle, new LinearLayout.LayoutParams(
+            content.addView(toggle, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
             if (entry.summary != null) {
@@ -212,7 +299,7 @@ public final class ModSettings {
                 summary.setText(entry.summary);
                 summary.setTextSize(13f);
                 summary.setAlpha(0.7f);
-                list.addView(summary, new LinearLayout.LayoutParams(
+                content.addView(summary, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             }
         }

@@ -65,8 +65,9 @@ public class ModViewHider extends View {
             View target = group.findViewById(id);
             if (target == null) continue;
 
+            boolean showInstead = rule[2].equals("show");
             boolean changeVisibility = !rule[2].equals("collapse");
-            boolean changeSize = !rule[2].equals("gone");
+            boolean changeSize = !rule[2].equals("gone") && !showInstead;
             int[] state = saved.get(target);
 
             if (ModSettings.get(rule[0])) {
@@ -79,7 +80,7 @@ public class ModViewHider extends View {
                     };
                     saved.put(target, state);
                 }
-                if (changeVisibility) target.setVisibility(View.GONE);
+                if (changeVisibility) target.setVisibility(showInstead ? View.VISIBLE : View.GONE);
                 if (changeSize && params != null) {
                     params.width = 0;
                     params.height = 0;
