@@ -126,10 +126,9 @@ val disableBottomBarAndAddMeTabPatch = bytecodePatch(
         // overwriting it outright: when the setting is on, p1 becomes true no matter what the
         // caller passed (bar forced hidden); when it's off, p1 keeps whatever value the caller
         // passed, so stock show/hide behavior is untouched rather than permanently disabled.
-        // Also registers this method + its host with Mod Settings every time it runs
-        // normally, so refreshBottomBar() can call it again on demand for a live toggle -
-        // p2's own meaning isn't pinned down, so the live-refresh call always passes
-        // false for it rather than guessing at whatever "true" might additionally trigger.
+        // Not attempted live - Mod Settings always reloads the activity on this toggle
+        // instead (see ModSettings.Entry.needsReload), landing back on the Local tab so a
+        // hide can never strand someone who reached Me tab with no back stack of their own.
         toggleMethod.addInstructions(
             0,
             """
@@ -137,9 +136,6 @@ val disableBottomBarAndAddMeTabPatch = bytecodePatch(
                 invoke-static {v0}, $MOD_SETTINGS_CLASS->get(Ljava/lang/String;)Z
                 move-result v0
                 or-int/2addr p1, v0
-
-                const-string v0, "${toggleMethod.name}"
-                invoke-static {p0, v0}, $MOD_SETTINGS_CLASS->onBottomBarOwner(Ljava/lang/Object;Ljava/lang/String;)V
             """.trimIndent(),
         )
 
