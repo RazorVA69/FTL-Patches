@@ -110,7 +110,7 @@ private object NavigateToMeFingerprint : Fingerprint(
 val disableBottomBarAndAddMeTabPatch = bytecodePatch(
     name = "Disable Bottom Bar And Add Me Tab To Top",
     description = "Adds a permanent Me tab button to the toolbar. Hiding the bottom bar itself is " +
-        "toggled in Me tab > Mod Settings, not here - the Me tab button always stays wired, " +
+        "toggled live in Me tab > Mod Settings, not here - the Me tab button always stays wired, " +
         "on purpose, since Mod Settings lives behind it and turning it off should never be able " +
         "to lock you out of turning it back on.",
     default = false,
@@ -120,17 +120,26 @@ val disableBottomBarAndAddMeTabPatch = bytecodePatch(
     dependsOn(addMeTabMenuResourcePatch, modSettingsPatch, modSettingFlagPatch(KEY_HOME_HIDE_BOTTOM_BAR))
 
     execute {
+        val toggleMethod = ToggleBottomBarFingerprint.method
+
         // OR the Mod Setting into the caller's own "should hide" argument (p1) instead of
         // overwriting it outright: when the setting is on, p1 becomes true no matter what the
         // caller passed (bar forced hidden); when it's off, p1 keeps whatever value the caller
         // passed, so stock show/hide behavior is untouched rather than permanently disabled.
-        ToggleBottomBarFingerprint.method.addInstructions(
+        // Also registers this method + its host with Mod Settings every time it runs
+        // normally, so refreshBottomBar() can call it again on demand for a live toggle -
+        // p2's own meaning isn't pinned down, so the live-refresh call always passes
+        // false for it rather than guessing at whatever "true" might additionally trigger.
+        toggleMethod.addInstructions(
             0,
             """
                 const-string v0, "$KEY_HOME_HIDE_BOTTOM_BAR"
                 invoke-static {v0}, $MOD_SETTINGS_CLASS->get(Ljava/lang/String;)Z
                 move-result v0
                 or-int/2addr p1, v0
+
+                const-string v0, "${toggleMethod.name}"
+                invoke-static {p0, v0}, $MOD_SETTINGS_CLASS->onBottomBarOwner(Ljava/lang/Object;Ljava/lang/String;)V
             """.trimIndent(),
         )
 
