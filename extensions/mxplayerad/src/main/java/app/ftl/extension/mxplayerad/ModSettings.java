@@ -65,10 +65,11 @@ public final class ModSettings {
             "Home screen",
             "home_hide_bottom_bar",
             "Hide bottom navigation bar",
-            "Applies the next time the bottom bar would show or hide. The Me tab button in the " +
-                "toolbar stays either way, so this switch can never lock you out of itself.",
+            "The Me tab button in the toolbar stays either way, so this switch can never lock " +
+                "you out of itself.",
             true,
-            false
+            false,
+            true
         ),
         new Entry(
             "Me tab",
@@ -212,6 +213,8 @@ public final class ModSettings {
     private static Context appContext;
     private static WeakReference<Object> tilesOwner;
     private static String tilesMethod;
+    private static WeakReference<Object> bottomBarOwner;
+    private static String bottomBarMethod;
 
     private ModSettings() {}
 
@@ -234,6 +237,28 @@ public final class ModSettings {
             Method method = owner.getClass().getDeclaredMethod(tilesMethod);
             method.setAccessible(true);
             method.invoke(owner);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static void onBottomBarOwner(Object owner, String method) {
+        bottomBarOwner = new WeakReference<Object>(owner);
+        bottomBarMethod = method;
+    }
+
+    private static boolean refreshBottomBar() {
+        Object owner = bottomBarOwner == null ? null : bottomBarOwner.get();
+        if (owner == null || bottomBarMethod == null) return false;
+        try {
+            Method method = owner.getClass().getDeclaredMethod(bottomBarMethod, boolean.class, boolean.class);
+            method.setAccessible(true);
+            // p1 is re-derived from the current Mod Setting by the patch's own inserted
+            // check (an OR into whatever we pass), so false here just means "don't force
+            // hide on top of that" - p2's own meaning isn't pinned, false avoids guessing
+            // at whatever "true" might additionally trigger (most likely an animation).
+            method.invoke(owner, false, false);
             return true;
         } catch (Throwable ignored) {
             return false;
@@ -268,7 +293,7 @@ public final class ModSettings {
         for (final Entry entry : ENTRIES) {
             if (!isPatched(dc, entry.key)) continue;
             shown++;
-            if (entry.tiles) initial.put(entry.key, get(entry.key));
+            if (entry.tiles || entry.bottomBar) initial.put(entry.key, get(entry.key));
 
             LinearLayout content = groupContent.get(entry.group);
             if (content == null) {
@@ -339,6 +364,7 @@ public final class ModSettings {
                 public void onCheckedChanged(CompoundButton button, boolean checked) {
                     set(entry.key, checked);
                     if (entry.tiles && !refreshTiles()) refreshFailed[0] = true;
+                    if (entry.bottomBar && !refreshBottomBar()) refreshFailed[0] = true;
                 }
             });
             content.addView(toggle, new LinearLayout.LayoutParams(
@@ -446,14 +472,23 @@ public final class ModSettings {
         final String summary;
         final boolean def;
         final boolean tiles;
+        final boolean bottomBar;
 
         Entry(String group, String key, String title, String summary, boolean def, boolean tiles) {
+            this(group, key, title, summary, def, tiles, false);
+        }
+
+        Entry(
+            String group, String key, String title, String summary,
+            boolean def, boolean tiles, boolean bottomBar
+        ) {
             this.group = group;
             this.key = key;
             this.title = title;
             this.summary = summary;
             this.def = def;
             this.tiles = tiles;
+            this.bottomBar = bottomBar;
         }
     }
 }
