@@ -57,7 +57,7 @@ public final class ModSettings {
             "smart_enhance_toast",
             "Toast on enable",
             "On: toast when Smart Enhance turns on. Off: silent toggle.",
-            false,
+            true,
             false
         ),
         new Entry(
@@ -128,7 +128,7 @@ public final class ModSettings {
             true
         ),
         new Entry(
-            "Hidden features",
+            "Me tab",
             "hide_private_folder",
             "Hide Private Folder",
             "Hidden everywhere: Me tab tile, 3-dot menu of each file, and the multi-select menu.",
@@ -136,7 +136,7 @@ public final class ModSettings {
             true
         ),
         new Entry(
-            "Hidden features",
+            "Me tab",
             "hide_file_transfer",
             "Hide File Transfer",
             "Hidden everywhere: Me tab tile, 3-dot menu of each file, and the multi-select menu.",
@@ -144,7 +144,7 @@ public final class ModSettings {
             true
         ),
         new Entry(
-            "Hidden features",
+            "Me tab",
             "hide_add_to_playlist",
             "Hide Add to Playlist",
             "Hidden everywhere: 3-dot menu of each file, the multi-select menu, and the split toolbar.",
@@ -255,7 +255,7 @@ public final class ModSettings {
     }
 
     /**
-     * Fullscreen Dialog with a root screen listing each group (like a settings menu) and a
+     * Floating Dialog with a root screen listing each group (like a settings menu) and a
      * detail screen per group holding its switches - a cheap stand-in for a real nested
      * PreferenceScreen, built only from framework widgets (no androidx.preference dependency,
      * since it isn't confirmed present in this host app at runtime).
@@ -280,8 +280,8 @@ public final class ModSettings {
         boolean dark = (host.getResources().getConfiguration().uiMode
             & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
         int style = dark
-            ? android.R.style.Theme_DeviceDefault_NoActionBar
-            : android.R.style.Theme_DeviceDefault_Light_NoActionBar;
+            ? android.R.style.Theme_DeviceDefault_Dialog
+            : android.R.style.Theme_DeviceDefault_Light_Dialog;
 
         final Dialog dialog = new Dialog(host, style);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -319,10 +319,6 @@ public final class ModSettings {
         renderRoot(nav);
 
         dialog.show();
-        Window window = dialog.getWindow();
-        if (window != null) {
-            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        }
     }
 
     private static void renderRoot(final Nav nav) {
@@ -389,11 +385,11 @@ public final class ModSettings {
         scroll.addView(list, new FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
         screen.addView(scroll, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         nav.content.removeAllViews();
         nav.content.addView(screen, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     private static void renderCategory(final Nav nav, String groupName) {
@@ -475,11 +471,11 @@ public final class ModSettings {
         scroll.addView(list, new FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
         screen.addView(scroll, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         nav.content.removeAllViews();
         nav.content.addView(screen, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     private static LinearLayout buildHeader(final Nav nav, String title, final boolean isRoot) {
