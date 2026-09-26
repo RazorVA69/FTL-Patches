@@ -297,7 +297,7 @@ public final class ModSettings {
                 headerRow.setFocusable(true);
                 if (hasRipple) headerRow.setBackgroundResource(rippleRes);
 
-                IconView icon = new IconView(dc, iconFor(groupName), secondaryColor, dp(dc, 2));
+                IconView icon = new IconView(dc, iconFor(groupName), secondaryColor, 1.8f);
                 LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(
                     dp(dc, 22), dp(dc, 22));
                 iconParams.rightMargin = dp(dc, 14);
@@ -327,7 +327,7 @@ public final class ModSettings {
                     public void onClick(View v) {
                         boolean expand = newContent.getVisibility() != View.VISIBLE;
                         newContent.setVisibility(expand ? View.VISIBLE : View.GONE);
-                        chevron.setText(expand ? "\u25BE" : "\u25B8");
+                        chevron.setRotation(expand ? 90f : 0f);
                     }
                 });
 
