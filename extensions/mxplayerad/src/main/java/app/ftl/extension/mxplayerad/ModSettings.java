@@ -46,7 +46,7 @@ public final class ModSettings {
             "smart_enhance_skip_popup",
             "Skip intro popup",
             "On: the player menu item toggles Smart Enhance directly, without the popup and animation. Off: stock popup.",
-            true,
+            false,
             false
         ),
         new Entry(
@@ -263,7 +263,6 @@ public final class ModSettings {
 
         int shown = 0;
         Map<String, LinearLayout> groupContent = new LinkedHashMap<String, LinearLayout>();
-        int accentColor = resolveColor(dc, android.R.attr.colorAccent, 0xFF3399FF);
         int secondaryColor = resolveColor(dc, android.R.attr.textColorSecondary, 0xFF888888);
         TypedValue ripple = new TypedValue();
         final boolean hasRipple = dc.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true);
@@ -314,13 +313,11 @@ public final class ModSettings {
                 headerRow.addView(title, new LinearLayout.LayoutParams(
                     0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-                final TextView chevron = new TextView(dc);
-                chevron.setText("\u25B8");
-                chevron.setTextSize(16f);
-                chevron.setTextColor(accentColor);
-                chevron.setPadding(dp(dc, 8), 0, 0, 0);
-                headerRow.addView(chevron, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                final IconView chevron = new IconView(dc, IconView.ICON_CHEVRON, secondaryColor, 1.8f);
+                LinearLayout.LayoutParams chevronParams = new LinearLayout.LayoutParams(
+                    dp(dc, 18), dp(dc, 18));
+                chevronParams.leftMargin = dp(dc, 8);
+                headerRow.addView(chevron, chevronParams);
 
                 headerRow.setOnClickListener(new View.OnClickListener() {
                     @Override
@@ -489,6 +486,7 @@ public final class ModSettings {
         static final int ICON_HOME = 2;
         static final int ICON_PERSON = 3;
         static final int ICON_SIDEBAR = 4;
+        static final int ICON_CHEVRON = 5;
 
         private final int kind;
         private final Paint paint;
@@ -528,6 +526,9 @@ public final class ModSettings {
                     break;
                 case ICON_SIDEBAR:
                     drawSidebar(canvas);
+                    break;
+                case ICON_CHEVRON:
+                    drawChevron(canvas);
                     break;
                 default:
                     break;
@@ -576,6 +577,14 @@ public final class ModSettings {
             canvas.drawLine(4f, 7f, 20f, 7f, paint);
             canvas.drawLine(4f, 12f, 20f, 12f, paint);
             canvas.drawLine(4f, 17f, 20f, 17f, paint);
+        }
+
+        private void drawChevron(Canvas canvas) {
+            Path path = new Path();
+            path.moveTo(9f, 5f);
+            path.lineTo(16f, 12f);
+            path.lineTo(9f, 19f);
+            canvas.drawPath(path, paint);
         }
     }
 
