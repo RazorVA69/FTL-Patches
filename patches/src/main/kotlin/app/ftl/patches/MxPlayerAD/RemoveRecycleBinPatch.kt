@@ -103,14 +103,22 @@ val removeRecycleBinPatch = bytecodePatch(
         // compare build, versionCode 2001003531) - re-check against a fresh compare
         // zip if this patch ever needs to target a different build.
         // Real class name is obfuscated ("a" in the sample build, reshuffles every
-        // build) and its only real strings turned out non-unique/wrong-method, so this
-        // resolves it by the Kotlin source file name instead - R8 keeps original
-        // source-file attributes even when it renames the class/members, and combined
-        // with the real androidx superclass it uniquely picks this class out from its
-        // sibling nested classes (a$a/a$b/a$c) that share the same source file.
+        // build); sourceFile ("MediaDeleteConfirmDialog.kt") survives R8 renaming but
+        // is shared with this class's nested a$a/a$b/a$c siblings, so it alone isn't
+        // unique. The old check paired it with an exact superclass match
+        // ("Landroidx/appcompat/app/d;") - but that "d" is itself an obfuscated
+        // single-letter androidx name (AppCompatDialog, minified same as any app
+        // class) and reshuffles across builds just like any other leaf identifier,
+        // which is exactly why this broke on the next build. Anchored instead on the
+        // real, stable "androidx/appcompat/app/" package prefix (any AppCompatDialog-
+        // family superclass in that package) plus excluding nested types ('$' in the
+        // class name) - that distinguishes the outer dialog class from its nested
+        // siblings without pinning any obfuscated leaf name. Re-verify uniqueness
+        // (only one class should match) if this ever needs to target a different build.
         val dialogClass = mutableClassDefBy { classDef ->
             classDef.sourceFile == "MediaDeleteConfirmDialog.kt" &&
-                classDef.superclass == "Landroidx/appcompat/app/d;"
+                classDef.superclass?.startsWith("Landroidx/appcompat/app/") == true &&
+                '$' !in classDef.type
         }
 
         val onClickListenerType = "Landroid/content/DialogInterface\$OnClickListener;"
