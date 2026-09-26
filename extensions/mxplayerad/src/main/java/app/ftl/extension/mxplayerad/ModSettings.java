@@ -65,8 +65,8 @@ public final class ModSettings {
             "Home screen",
             "home_hide_bottom_bar",
             "Hide bottom navigation bar",
-            "The Me tab button in the toolbar stays either way, so this switch can never lock " +
-                "you out of itself.",
+            "The app reloads to the Local tab when you close this dialog. The Me tab button in " +
+                "the toolbar stays either way, so this switch can never lock you out of itself.",
             true,
             false,
             true
@@ -213,8 +213,6 @@ public final class ModSettings {
     private static Context appContext;
     private static WeakReference<Object> tilesOwner;
     private static String tilesMethod;
-    private static WeakReference<Object> bottomBarOwner;
-    private static String bottomBarMethod;
 
     private ModSettings() {}
 
@@ -237,28 +235,6 @@ public final class ModSettings {
             Method method = owner.getClass().getDeclaredMethod(tilesMethod);
             method.setAccessible(true);
             method.invoke(owner);
-            return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    public static void onBottomBarOwner(Object owner, String method) {
-        bottomBarOwner = new WeakReference<Object>(owner);
-        bottomBarMethod = method;
-    }
-
-    private static boolean refreshBottomBar() {
-        Object owner = bottomBarOwner == null ? null : bottomBarOwner.get();
-        if (owner == null || bottomBarMethod == null) return false;
-        try {
-            Method method = owner.getClass().getDeclaredMethod(bottomBarMethod, boolean.class, boolean.class);
-            method.setAccessible(true);
-            // p1 is re-derived from the current Mod Setting by the patch's own inserted
-            // check (an OR into whatever we pass), so false here just means "don't force
-            // hide on top of that" - p2's own meaning isn't pinned, false avoids guessing
-            // at whatever "true" might additionally trigger (most likely an animation).
-            method.invoke(owner, false, false);
             return true;
         } catch (Throwable ignored) {
             return false;
@@ -293,7 +269,7 @@ public final class ModSettings {
         for (final Entry entry : ENTRIES) {
             if (!isPatched(dc, entry.key)) continue;
             shown++;
-            if (entry.tiles || entry.bottomBar) initial.put(entry.key, get(entry.key));
+            if (entry.tiles || entry.needsReload) initial.put(entry.key, get(entry.key));
 
             LinearLayout content = groupContent.get(entry.group);
             if (content == null) {
@@ -364,7 +340,7 @@ public final class ModSettings {
                 public void onCheckedChanged(CompoundButton button, boolean checked) {
                     set(entry.key, checked);
                     if (entry.tiles && !refreshTiles()) refreshFailed[0] = true;
-                    if (entry.bottomBar && !refreshBottomBar()) refreshFailed[0] = true;
+                    if (entry.needsReload) refreshFailed[0] = true;
                 }
             });
             content.addView(toggle, new LinearLayout.LayoutParams(
@@ -472,7 +448,12 @@ public final class ModSettings {
         final String summary;
         final boolean def;
         final boolean tiles;
-        final boolean bottomBar;
+        // Never attempted live, unlike tiles: hiding the bottom bar in place can strand
+        // the user if they reached this screen via the bottom bar's own tab click (no
+        // back stack, no back arrow) rather than the toolbar's Me tab icon (which pushes
+        // its own back-navigable screen). Always falls through to the automatic reload
+        // instead, which resets to the Local tab and so can never trap anyone.
+        final boolean needsReload;
 
         Entry(String group, String key, String title, String summary, boolean def, boolean tiles) {
             this(group, key, title, summary, def, tiles, false);
@@ -480,7 +461,7 @@ public final class ModSettings {
 
         Entry(
             String group, String key, String title, String summary,
-            boolean def, boolean tiles, boolean bottomBar
+            boolean def, boolean tiles, boolean needsReload
         ) {
             this.group = group;
             this.key = key;
@@ -488,7 +469,7 @@ public final class ModSettings {
             this.summary = summary;
             this.def = def;
             this.tiles = tiles;
-            this.bottomBar = bottomBar;
+            this.needsReload = needsReload;
         }
     }
 }
