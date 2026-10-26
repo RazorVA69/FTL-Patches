@@ -1,3 +1,15 @@
+## [1.43.7.1](https://github.com/RazorVA69/FTL-Patches/compare/v1.43.7...v1.43.7.1) (2026-10-26)
+
+### ✨ New Features
+
+* up ([ad7474a](https://github.com/RazorVA69/FTL-Patches/commit/ad7474ab0af45b5806e5c063e2836ea0a1952184))
+
+### 🐛 Bug Fixes
+
+* up ([acb6486](https://github.com/RazorVA69/FTL-Patches/commit/acb64861a942865da6a45370529dbf0fedb95f8b))
+* up ([047bfa6](https://github.com/RazorVA69/FTL-Patches/commit/047bfa6ea4178e8c6df8eaefaeaf58d3c7db1458))
+* up ([d18bcb3](https://github.com/RazorVA69/FTL-Patches/commit/d18bcb321ac8a0ec3a309672495f9567bc969a7d))
+
 ## [1.43.7.1-dev.1](https://github.com/RazorVA69/FTL-Patches/compare/v1.43.7...v1.43.7.1-dev.1) (2026-10-26)
 
 ### 🐛 Bug Fixes
